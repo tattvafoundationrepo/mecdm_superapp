@@ -26,52 +26,14 @@ from datetime import date
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
-
+from google.adk.apps import App
 # from google.adk.tools import load_artifacts
 from google.genai import types
-from opentelemetry import trace
-from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-    OTLPSpanExporter,
-)
-from opentelemetry.sdk import trace as trace_sdk
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 
 from .prompts import return_instructions_root
-from .sub_agents import bqml_agent
-from .sub_agents.alloydb.tools import (
-    get_database_settings as get_alloydb_database_settings,
-)
-from .sub_agents.bigquery.tools import (
-    get_database_settings as get_bq_database_settings,
-)
-from .tools import call_alloydb_agent, call_analytics_agent, call_bigquery_agent
-
-# Configure Weave endpoint and authentication
-_WANDB_BASE_URL = "https://trace.wandb.ai"
-_WANDB_PROJECT_ID = os.getenv("WANDB_PROJECT_ID")
-_OTEL_EXPORTER_OTLP_ENDPOINT = f"{_WANDB_BASE_URL}/otel/v1/traces"
-
-# Set up authentication
-_WANDB_API_KEY = os.getenv("WANDB_API_KEY")
-_WANDB_AUTH = base64.b64encode(f"api:{_WANDB_API_KEY}".encode()).decode()
-
-_OTEL_EXPORTER_OTLP_HEADERS = {
-    "Authorization": f"Basic {_WANDB_AUTH}",
-    "project_id": _WANDB_PROJECT_ID,
-}
-
-# Create the OTLP span exporter with endpoint and headers
-exporter = OTLPSpanExporter(
-    endpoint=_OTEL_EXPORTER_OTLP_ENDPOINT,
-    headers=_OTEL_EXPORTER_OTLP_HEADERS,
-)
-
-# Create a tracer provider and add the exporter
-_tracer_provider = trace_sdk.TracerProvider()
-_tracer_provider.add_span_processor(SimpleSpanProcessor(exporter))
-
-# Set the global tracer provider BEFORE importing/using ADK
-trace.set_tracer_provider(_tracer_provider)
+from .sub_agents.alloydb.tools import \
+    get_database_settings as get_alloydb_database_settings
+from .tools import call_alloydb_agent, call_analytics_agent
 
 # Set up logging
 # Note this level can be overridden by adk web on the command line;
@@ -82,7 +44,7 @@ _logger = logging.getLogger(__name__)
 # Initialize module-level config variables
 _dataset_config = {}
 _database_settings = {}
-_supported_dataset_types = ["bigquery", "alloydb"]
+_supported_dataset_types = ["alloydb"]
 _required_dataset_config_params = ["name", "description"]
 
 
@@ -119,10 +81,7 @@ def load_dataset_config():
 def get_database_settings(db_type: str) -> dict:
     """Wrapper function to get database settings by type"""
     assert db_type in _supported_dataset_types
-    if db_type == "bigquery":
-        return get_bq_database_settings()
-    else:
-        return get_alloydb_database_settings()
+    return get_alloydb_database_settings()
 
 
 def init_database_settings(dataset_config: dict) -> dict:
@@ -178,10 +137,7 @@ def get_root_agent() -> LlmAgent:
     tools = [call_analytics_agent]
     sub_agents = []
     for dataset in _dataset_config["datasets"]:
-        if dataset["type"] == "bigquery":
-            tools.append(call_bigquery_agent)
-            sub_agents.append(bqml_agent)
-        elif dataset["type"] == "alloydb":
+        if dataset["type"] == "alloydb":
             tools.append(call_alloydb_agent)
 
     agent = LlmAgent(
@@ -212,6 +168,5 @@ _database_settings = init_database_settings(_dataset_config)
 # Fetch the root agent
 root_agent = get_root_agent()
 
-from google.adk.apps import App
 
 app = App(root_agent=root_agent, name="data_science")

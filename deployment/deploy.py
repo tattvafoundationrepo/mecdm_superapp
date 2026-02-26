@@ -133,7 +133,8 @@ def create(env_vars: dict[str, str]) -> None:
     if not os.path.exists(AGENT_WHL_FILE):
         logger.error("Agent wheel file not found at: %s", AGENT_WHL_FILE)
         # Consider adding instructions here on how to build the wheel file
-        raise FileNotFoundError(f"Agent wheel file not found: {AGENT_WHL_FILE}")
+        raise FileNotFoundError(
+            f"Agent wheel file not found: {AGENT_WHL_FILE}")
 
     logger.info("Using agent wheel file: %s", AGENT_WHL_FILE)
 
@@ -176,7 +177,8 @@ def main(argv: list[str]) -> None:  # pylint: disable=unused-argument
         else os.getenv("GOOGLE_CLOUD_PROJECT")
     )
     location = (
-        FLAGS.location if FLAGS.location else os.getenv("GOOGLE_CLOUD_LOCATION")
+        FLAGS.location if FLAGS.location else os.getenv(
+            "GOOGLE_CLOUD_LOCATION")
     )
     # Default bucket name convention if not provided
     default_bucket_name = f"{project_id}-adk-staging" if project_id else None
@@ -192,13 +194,7 @@ def main(argv: list[str]) -> None:  # pylint: disable=unused-argument
         "ROOT_AGENT_MODEL",
         "ANALYTICS_AGENT_MODEL",
         "BASELINE_NL2SQL_MODEL",
-        "BIGQUERY_AGENT_MODEL",
-        "BQML_AGENT_MODEL",
         "CHASE_NL2SQL_MODEL",
-        "BQ_DATASET_ID",
-        "BQ_DATA_PROJECT_ID",
-        "BQ_COMPUTE_PROJECT_ID",
-        "BQML_RAG_CORPUS_NAME",
         "CODE_INTERPRETER_EXTENSION_NAME",
         "NL2SQL_METHOD",
     ]
@@ -220,7 +216,8 @@ def main(argv: list[str]) -> None:  # pylint: disable=unused-argument
         )
 
     logger.info(
-        "Environment variables to be passed to agent: %s", list(env_vars.keys())
+        "Environment variables to be passed to agent: %s", list(
+            env_vars.keys())
     )
 
     logger.info("Using PROJECT: %s", project_id)

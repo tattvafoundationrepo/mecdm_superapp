@@ -8,7 +8,7 @@ sources:
         database: ${ALLOYDB_POSTGRES_DATABASE}
         user: ${ALLOYDB_POSTGRES_USER}
         password: ${ALLOYDB_POSTGRES_PASSWORD}
-        ipType: private
+        # ipType: private
 
 tools:
     execute_sql:

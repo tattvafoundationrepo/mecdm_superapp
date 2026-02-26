@@ -25,8 +25,6 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from data_science.agent import root_agent
-from data_science.sub_agents.bigquery.agent import database_agent
-from data_science.sub_agents.bqml.agent import root_agent as bqml_agent
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -86,25 +84,6 @@ class TestAgents(unittest.IsolatedAsyncioTestCase):
         """Test the ds_agent from the root agent."""
         query = "plot the most selling category"
         response = self._run_agent(root_agent, query)
-        print(response)
-        self.assertIsNotNone(response)
-
-    @pytest.mark.bqml
-    async def test_bqml_agent_can_check_for_models(self):
-        """Test that the bqml_agent can check for existing models."""
-        query = "Are there any existing models in the dataset?"
-        response = self._run_agent(bqml_agent, query)
-        print(response)
-        self.assertIsNotNone(response)
-
-    @pytest.mark.bqml
-    async def test_bqml_agent_can_execute_code(self):
-        """Test that the bqml_agent can execute BQML code."""
-        query = """
-    I want to train a BigQuery ML model on the sales_train_validation data for sales prediction.
-    Please show me an execution plan.
-    """
-        response = self._run_agent(bqml_agent, query)
         print(response)
         self.assertIsNotNone(response)
 
