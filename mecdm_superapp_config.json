@@ -10,7 +10,7 @@
           "description": "Central fact table. One row per pregnancy (NOT per mother). A mother with multiple pregnancies has multiple rows sharing the same mother_id. Some rows are child-only (no pregnancy registration) and have NULL pregnancy_id. Covers registration, all ANC visit summaries, delivery outcome, and child outcome in a single denormalised row. ~363,898 rows.",
           "primary_key": "row_id",
           "key_columns": ["row_id", "mother_id", "pregnancy_id", "district", "block", "village", "registration_date", "delivery_date", "pregnancy_status", "high_risk_at_registration", "delivery_category", "delivery_type", "maternal_death", "baby_weight_kg", "baby_gender", "infant_death", "low_birth_weight", "severe_anemia", "gps_location"],
-          "notes": "row_id is SERIAL surrogate PK. mother_id is non-unique. pregnancy_id is UNIQUE with NULLs allowed (Postgres UNIQUE allows multiple NULLs). pregnancy_id format: '{mother_id} - {sno}'. gps_location stores WKT string — use ST_GeomFromText(gps_location, 4326) to convert."
+          "notes": "row_id is SERIAL surrogate PK. mother_id is non-unique. pregnancy_id is UNIQUE with NULLs allowed (Postgres UNIQUE allows multiple NULLs). pregnancy_id format: <mother_id>-<sno>. gps_location stores WKT string — use ST_GeomFromText(gps_location, 4326) to convert."
         },
         {
           "name": "anc_visits",

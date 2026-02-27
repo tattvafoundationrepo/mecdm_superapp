@@ -800,7 +800,7 @@ def apply_comments(engine):
             "mother_id":
                 "Meghealth mother identifier. Non-unique — a mother has one row per pregnancy. Indexed for cross-pregnancy lookups.",
             "pregnancy_id":
-                "Unique (NULLs allowed) composite ID, format: '{mother_id} - {sno}'. NULL for child-only records. FK target for raw_pregnancy_records.",
+                "Unique (NULLs allowed) composite ID, format: <mother_id>-<sno>. NULL for child-only records. FK target for raw_pregnancy_records.",
             "gps_location":
                 "GPS location as WKT string (POINT lon lat). Convert to geometry with: ST_GeomFromText(gps_location, 4326).",
             "district":
@@ -846,7 +846,7 @@ def apply_comments(engine):
         "raw_pregnancy_records": {
             "row_id":       "Surrogate primary key (SERIAL). Added during migration.",
             "mother_id":    "Extracted from JSON for indexing.",
-            "pregnancy_id": "Pregnancy ID in format '{mother_id} - {sno}'. FK → mother_journeys.pregnancy_id.",
+            "pregnancy_id": "Pregnancy ID in format <mother_id>-<sno>. FK → mother_journeys.pregnancy_id.",
         },
         "master_villages": {
             "village_id":        "Primary key, format: 'V-NNNNN'.",
