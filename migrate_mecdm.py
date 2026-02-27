@@ -565,10 +565,13 @@ def apply_primary_keys(engine):
         "ALTER TABLE master_villages ADD PRIMARY KEY (village_id);",
         "ALTER TABLE master_health_facilities ADD PRIMARY KEY (facility_id);",
         # Core health data
-        # mother_journeys has one row per PREGNANCY (a mother appears multiple
-        # times for successive pregnancies), so pregnancy_id is the true PK.
-        # mother_id is non-unique and gets only an index (see apply_indexes).
-        "ALTER TABLE mother_journeys ADD PRIMARY KEY (pregnancy_id);",
+        # pregnancy_id has NULL values for mothers registered without a tracked
+        # pregnancy (child-only records), so it cannot be a NOT NULL primary key.
+        # Use a SERIAL surrogate PK + UNIQUE constraint on pregnancy_id.
+        # PostgreSQL UNIQUE allows multiple NULLs, so this succeeds even with
+        # nulls AND still satisfies FK references from raw_pregnancy_records.
+        "ALTER TABLE mother_journeys ADD COLUMN row_id SERIAL PRIMARY KEY;",
+        "ALTER TABLE mother_journeys ADD CONSTRAINT uq_pregnancy_id UNIQUE (pregnancy_id);",
         "ALTER TABLE anc_visits ADD PRIMARY KEY (anc_id);",
         # Raw records — surrogate serial key (natural keys may have duplicates/nulls)
         "ALTER TABLE raw_anc_records ADD COLUMN row_id SERIAL PRIMARY KEY;",
@@ -769,7 +772,7 @@ def apply_comments(engine):
             "Facility-to-village mapping: district → block → PHC → sub-centre → village hierarchy used in Meghealth.",
         # Health data
         "mother_journeys":
-            "Complete maternal journey from pregnancy registration through delivery and child outcome. ~363,898 records. PK: pregnancy_id. mother_id is non-unique (one row per pregnancy, not per mother).",
+            "Complete maternal journey from pregnancy registration through delivery and child outcome. ~363,898 records. PK: row_id (SERIAL). pregnancy_id is UNIQUE (NULLs allowed — some rows are child-only with no pregnancy registration). mother_id is non-unique (one row per pregnancy).",
         "anc_visits":
             "Antenatal Care (ANC) visit records with clinical vitals (weight, BP, Hb), medications, and danger signs. ~361,551 records. PK: anc_id, FK: mother_id → mother_journeys.",
         "village_indicators_monthly":
@@ -792,10 +795,12 @@ def apply_comments(engine):
 
     col_comments = {
         "mother_journeys": {
+            "row_id":
+                "Surrogate primary key (SERIAL). Added during migration — pregnancy_id is nullable so cannot be the PK.",
             "mother_id":
                 "Meghealth mother identifier. Non-unique — a mother has one row per pregnancy. Indexed for cross-pregnancy lookups.",
             "pregnancy_id":
-                "Primary key. Composite ID, format: '{mother_id} - {sno}'. Referenced by raw_pregnancy_records via FK.",
+                "Unique (NULLs allowed) composite ID, format: '{mother_id} - {sno}'. NULL for child-only records. FK target for raw_pregnancy_records.",
             "gps_location":
                 "GPS location as WKT string (POINT lon lat). Convert to geometry with: ST_GeomFromText(gps_location, 4326).",
             "district":
@@ -831,14 +836,12 @@ def apply_comments(engine):
             "geometry_y":         "Latitude (same as 'latitude' column, kept for source compatibility).",
         },
         "raw_anc_records": {
-            "row_id":     "Surrogate primary key (SERIAL). Added during migration.",
-            "mother_id":  "Extracted from JSON for indexing. FK → mother_journeys.mother_id.",
-            "pregnancy_id":"Extracted from JSON for FK → mother_journeys.pregnancy_id (if present).",
+            "row_id":    "Surrogate primary key (SERIAL). Added during migration.",
+            "mother_id": "Extracted from JSON for indexing. FK → mother_journeys.mother_id.",
         },
         "raw_child_records": {
-            "row_id":     "Surrogate primary key (SERIAL). Added during migration.",
-            "mother_id":  "Extracted from JSON for indexing. FK → mother_journeys.mother_id.",
-            "pregnancy_id":"Extracted from JSON for FK → mother_journeys.pregnancy_id (if present).",
+            "row_id":    "Surrogate primary key (SERIAL). Added during migration.",
+            "mother_id": "Extracted from JSON for indexing. FK → mother_journeys.mother_id.",
         },
         "raw_pregnancy_records": {
             "row_id":       "Surrogate primary key (SERIAL). Added during migration.",
@@ -858,21 +861,15 @@ def apply_comments(engine):
         },
     }
 
-    with engine.begin() as conn:
-        for tbl, comment in table_comments.items():
-            try:
-                safe = comment.replace("'", "''")
-                conn.execute(text(f"COMMENT ON TABLE {tbl} IS '{safe}';"))
-            except Exception as exc:
-                logger.warning(f"[comments] {tbl}: {exc!s:.80}")
-
-        for tbl, cols in col_comments.items():
-            for col, comment in cols.items():
-                try:
-                    safe = comment.replace("'", "''")
-                    conn.execute(text(f"COMMENT ON COLUMN {tbl}.{col} IS '{safe}';"))
-                except Exception as exc:
-                    logger.warning(f"[comments] {tbl}.{col}: {exc!s:.80}")
+    statements = []
+    for tbl, comment in table_comments.items():
+        safe = comment.replace("'", "''")
+        statements.append(f"COMMENT ON TABLE {tbl} IS '{safe}';")
+    for tbl, cols in col_comments.items():
+        for col, comment in cols.items():
+            safe = comment.replace("'", "''")
+            statements.append(f"COMMENT ON COLUMN {tbl}.{col} IS '{safe}';")
+    _exec_sql(engine, statements, "comments")
 
 
 # ===========================================================================
