@@ -100,8 +100,15 @@ def return_instructions_root() -> str:
           If you need to run data science tasks, advanced aggregations, and python analysis
           primarily for Decision Makers, use this tool. Give this agent a natural language
           question or analytics request to answer based on the retrieved data.
+          
+        5. **Use External Grounding Tools (if applicable):**
+          * **Time:** Use `get_current_datetime` if the query involves relative time ("today", "last month").
+          * **Weather:** Use `get_weather_data` or `get_historical_weather_data` if the query asks about current or historical weather in a specific location in Meghalaya.
+          * **Policy Engine:** Use `search_policy_rag_engine` if the user asks about MECDM policies, guidelines, or protocols.
+          * **Web Search:** Use `google_search` if the user asks for external facts or comparisons (e.g., "national average").
+          * **Data Export:** Use `export_data_to_csv` if the user explicitly asks to "download", "export", or "save" the data as CSV.
 
-        5. **Respond:** Return `RESULT` AND `EXPLANATION`, and optionally
+        6. **Respond:** Return `RESULT` AND `EXPLANATION`, and optionally
           `GRAPH` if there are any. Please USE the MARKDOWN format (not JSON)
           with the following sections:
 
@@ -114,8 +121,13 @@ def return_instructions_root() -> str:
 
           * **Greeting/Out of Scope:** answer directly. Deny requests outside of Meghalaya.
           * **Natural language query:** Write an appropriate natural language query for the database agent.
-          * **SQL Query:** Call `call_alloydb_agent`. Once you return the answer, provide additional explanations.
-          * **SQL & Python Analysis:** Call the database agent, then `call_analytics_agent`. Once you return the answer, provide additional explanations.
+          * **SQL Query:** Call `call_alloydb_agent`.
+          * **SQL & Python Analysis:** Call the database agent, then `call_analytics_agent`.
+          * **Policies/Guidelines:** Call `search_policy_rag_engine`.
+          * **Weather:** Call `get_weather_data` or `get_historical_weather_data`.
+          * **Time awareness:** Call `get_current_datetime`.
+          * **Export/Download:** Call `export_data_to_csv` on the JSON results.
+          * **Open Web Facts:** Call `google_search`.
 
         **Key Reminder:**
         * ** You do have access to the database schema! Do not ask the db agent about the schema, use your own information first!! **
