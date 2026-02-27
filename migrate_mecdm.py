@@ -170,6 +170,18 @@ def get_row_count(engine, table_name: str) -> int:
         return conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
 
 
+def _drop_cascade(engine, table_name: str) -> None:
+    """
+    DROP TABLE IF EXISTS ... CASCADE before a reload.
+
+    pandas/geopandas `to_sql(if_exists='replace')` issues a plain DROP TABLE,
+    which fails when FK constraints from a previous migration run depend on the
+    table.  Calling this first removes those dependencies cleanly.
+    """
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {table_name} CASCADE"))
+
+
 def create_extensions(engine):
     logger.info("Ensuring PostGIS extension is installed…")
     with engine.begin() as conn:
@@ -248,7 +260,27 @@ def load_geojson(engine, filepath: str | Path, table_name: str, comment: str = "
         gdf = gpd.read_file(filepath)
         if gdf.crs is None or gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
+        # Normalise the GIS object-ID column to 'id' so all geo tables share a
+        # consistent integer PK name.  The source GeoJSON files use 'objectid'
+        # or 'objectid_1'.  Some files also have a string 'id' column (a legacy
+        # Census/GIS code); we preserve it as 'legacy_id' when non-null, or drop
+        # it when all-null, before renaming objectid → id.
+        if "objectid" in gdf.columns:
+            if "id" in gdf.columns:
+                if gdf["id"].notna().any():
+                    gdf = gdf.rename(columns={"id": "legacy_id"})
+                else:
+                    gdf = gdf.drop(columns=["id"])
+            gdf = gdf.rename(columns={"objectid": "id"})
+        elif "objectid_1" in gdf.columns:
+            if "id" in gdf.columns:
+                if gdf["id"].notna().any():
+                    gdf = gdf.rename(columns={"id": "legacy_id"})
+                else:
+                    gdf = gdf.drop(columns=["id"])
+            gdf = gdf.rename(columns={"objectid_1": "id"})
         geom_type = gdf.geometry.geom_type.mode()[0].upper() if not gdf.empty else "GEOMETRY"
+        _drop_cascade(engine, table_name)
         gdf.to_postgis(
             table_name, engine,
             if_exists="replace", index=False,
@@ -269,6 +301,7 @@ def load_csv_small(engine, filepath: str | Path, table_name: str, comment: str =
     logger.info(f"Loading {filepath.name} → {table_name}…")
     try:
         df = pd.read_csv(filepath, low_memory=False)
+        _drop_cascade(engine, table_name)
         df.to_sql(table_name, engine, if_exists="replace", index=False)
         logger.info(f"  ✓ {table_name}: {len(df):,} rows")
     except Exception as exc:
@@ -300,6 +333,7 @@ def load_csv_with_points(
 
         if valid.empty:
             logger.warning(f"  No valid coordinates in {table_name}, loading without geometry")
+            _drop_cascade(engine, table_name)
             df.to_sql(table_name, engine, if_exists="replace", index=False)
             return
 
@@ -309,6 +343,7 @@ def load_csv_with_points(
             crs="EPSG:4326",
         )
         gdf.rename_geometry("geom", inplace=True)
+        _drop_cascade(engine, table_name)
         gdf.to_postgis(
             table_name, engine,
             if_exists="replace", index=False,
@@ -350,6 +385,7 @@ def load_csv_large(
 
     size_mb = filepath.stat().st_size / 1024 / 1024
     logger.info(f"Loading {filepath.name} → {table_name} ({size_mb:.0f} MB, COPY protocol)…")
+    _drop_cascade(engine, table_name)
 
     reader = pd.read_csv(
         filepath,
@@ -447,6 +483,7 @@ def load_json_flat(
                     lambda x: json.dumps(x) if isinstance(x, (list, dict)) else x
                 )
 
+        _drop_cascade(engine, table_name)
         df.to_sql(table_name, engine, if_exists="replace", index=False)
         logger.info(f"  ✓ {table_name}: {len(df):,} rows")
     except Exception as exc:
@@ -505,7 +542,8 @@ def load_json_normalized(
                 lambda x: json.dumps(x) if isinstance(x, (list, dict)) else x
             )
 
-    # Create empty table structure
+    # Create empty table structure (drop with CASCADE first to clear any FKs)
+    _drop_cascade(engine, table_name)
     df.head(0).to_sql(table_name, engine, if_exists="replace", index=False)
 
     # Bulk insert via COPY in batches
@@ -559,7 +597,33 @@ def apply_primary_keys(engine):
     """Add primary keys and unique constraints to all tables."""
     logger.info("Applying primary keys and unique constraints…")
     statements = [
-        # Master reference
+        # ── Geo tables: 'id' column already loaded by load_geojson (objectid/objectid_1
+        # is renamed to 'id' in the GeoDataFrame before to_postgis, so no DDL rename needed)
+        # states — lgd_statecode is unique (1 state); needed as FK target for districts
+        "ALTER TABLE states ADD PRIMARY KEY (id);",
+        "ALTER TABLE states ADD CONSTRAINT uq_states_lgd_statecode UNIQUE (lgd_statecode);",
+
+        # districts — lgd_districtcode has 1 NULL (UNIQUE OK: PG treats NULLs as distinct)
+        "ALTER TABLE districts ADD PRIMARY KEY (id);",
+        "ALTER TABLE districts ADD CONSTRAINT uq_districts_lgd_districtcode UNIQUE (lgd_districtcode);",
+
+        # district_boundaries — no LGD codes; PK only
+        "ALTER TABLE district_boundaries ADD PRIMARY KEY (id);",
+
+        # subdistricts — lgd_subdistrictcode fully unique (46 values, 0 NULLs)
+        "ALTER TABLE subdistricts ADD PRIMARY KEY (id);",
+        "ALTER TABLE subdistricts ADD CONSTRAINT uq_subdistricts_lgd_subdistrictcode UNIQUE (lgd_subdistrictcode);",
+
+        # blocks — no LGD codes in source; PK only
+        "ALTER TABLE blocks ADD PRIMARY KEY (id);",
+
+        # villages_poly — lgd_villagecode has NULLs + duplicates; no UNIQUE possible
+        "ALTER TABLE villages_poly ADD PRIMARY KEY (id);",
+
+        # villages_point
+        "ALTER TABLE villages_point ADD PRIMARY KEY (id);",
+
+        # ── Master reference ───────────────────────────────────────────────────
         "ALTER TABLE master_districts ADD PRIMARY KEY (district_code_lgd);",
         "ALTER TABLE master_blocks ADD PRIMARY KEY (block_code_lgd);",
         "ALTER TABLE master_villages ADD PRIMARY KEY (village_id);",
@@ -596,6 +660,114 @@ def apply_foreign_keys(engine):
     """
     logger.info("Applying foreign key constraints…")
     fk_statements = [
+        # ── Master internal hierarchy FKs ──────────────────────────────────────
+        # master_blocks → master_districts
+        """
+        ALTER TABLE master_blocks
+          ADD CONSTRAINT fk_master_blocks_district
+          FOREIGN KEY (district_code_lgd) REFERENCES master_districts(district_code_lgd);
+        """,
+        # master_villages → master_blocks (block_code_lgd)
+        """
+        ALTER TABLE master_villages
+          ADD CONSTRAINT fk_master_villages_block
+          FOREIGN KEY (block_code_lgd) REFERENCES master_blocks(block_code_lgd);
+        """,
+        # master_villages → master_districts (district_code_lgd)
+        """
+        ALTER TABLE master_villages
+          ADD CONSTRAINT fk_master_villages_district
+          FOREIGN KEY (district_code_lgd) REFERENCES master_districts(district_code_lgd);
+        """,
+        # master_health_facilities → master_blocks
+        """
+        ALTER TABLE master_health_facilities
+          ADD CONSTRAINT fk_master_hf_block
+          FOREIGN KEY (block_code_lgd) REFERENCES master_blocks(block_code_lgd);
+        """,
+        # master_health_facilities → master_districts
+        """
+        ALTER TABLE master_health_facilities
+          ADD CONSTRAINT fk_master_hf_district
+          FOREIGN KEY (district_code_lgd) REFERENCES master_districts(district_code_lgd);
+        """,
+
+        # ── Master → Geo FK constraints (LGD district code bridge) ─────────────
+        # master_districts.district_code_lgd → districts.lgd_districtcode
+        # (lgd_districtcode is UNIQUE in districts; 1 NULL district has NULL lgd_districtcode
+        #  but PG FK allows NULLs on both sides so this is safe)
+        """
+        ALTER TABLE master_districts
+          ADD CONSTRAINT fk_master_districts_geo
+          FOREIGN KEY (district_code_lgd) REFERENCES districts(lgd_districtcode);
+        """,
+        # master_blocks.district_code_lgd → districts.lgd_districtcode
+        """
+        ALTER TABLE master_blocks
+          ADD CONSTRAINT fk_master_blocks_geo_district
+          FOREIGN KEY (district_code_lgd) REFERENCES districts(lgd_districtcode);
+        """,
+        # master_villages.district_code_lgd → districts.lgd_districtcode
+        """
+        ALTER TABLE master_villages
+          ADD CONSTRAINT fk_master_villages_geo_district
+          FOREIGN KEY (district_code_lgd) REFERENCES districts(lgd_districtcode);
+        """,
+        # master_health_facilities.district_code_lgd → districts.lgd_districtcode
+        """
+        ALTER TABLE master_health_facilities
+          ADD CONSTRAINT fk_master_hf_geo_district
+          FOREIGN KEY (district_code_lgd) REFERENCES districts(lgd_districtcode);
+        """,
+        # geo_full_mapping.district_code_lgd → districts.lgd_districtcode
+        # (geo_full_mapping has NULL district_code_lgd for unmatched rows; FK allows child NULLs)
+        """
+        ALTER TABLE geo_full_mapping
+          ADD CONSTRAINT fk_geo_full_map_district
+          FOREIGN KEY (district_code_lgd) REFERENCES districts(lgd_districtcode);
+        """,
+
+        # ── Geographic hierarchy FKs ───────────────────────────────────────────
+        # districts → states (via lgd_statecode; all 12 districts have a state code)
+        """
+        ALTER TABLE districts
+          ADD CONSTRAINT fk_districts_state
+          FOREIGN KEY (lgd_statecode) REFERENCES states(lgd_statecode);
+        """,
+        # subdistricts → districts (lgd_districtcode; 0 NULLs in subdistricts)
+        """
+        ALTER TABLE subdistricts
+          ADD CONSTRAINT fk_subdistricts_district
+          FOREIGN KEY (lgd_districtcode) REFERENCES districts(lgd_districtcode);
+        """,
+        # villages_poly → subdistricts (lgd_subdistrictcode; 0 NULLs in villages_poly)
+        """
+        ALTER TABLE villages_poly
+          ADD CONSTRAINT fk_villages_poly_subdistrict
+          FOREIGN KEY (lgd_subdistrictcode) REFERENCES subdistricts(lgd_subdistrictcode);
+        """,
+        # villages_poly → districts (lgd_districtcode; 0 NULLs in villages_poly)
+        """
+        ALTER TABLE villages_poly
+          ADD CONSTRAINT fk_villages_poly_district
+          FOREIGN KEY (lgd_districtcode) REFERENCES districts(lgd_districtcode);
+        """,
+        # villages_point → subdistricts (lgd_subdistrictcode; 0 NULLs)
+        """
+        ALTER TABLE villages_point
+          ADD CONSTRAINT fk_villages_point_subdistrict
+          FOREIGN KEY (lgd_subdistrictcode) REFERENCES subdistricts(lgd_subdistrictcode);
+        """,
+        # villages_point → districts (lgd_districtcode; 0 NULLs)
+        """
+        ALTER TABLE villages_point
+          ADD CONSTRAINT fk_villages_point_district
+          FOREIGN KEY (lgd_districtcode) REFERENCES districts(lgd_districtcode);
+        """,
+        # blocks & district_boundaries have no LGD codes — join by district name only
+        # (no DB-level FK possible; use logical joins in application layer)
+
+        # ── Health / pregnancy FKs ─────────────────────────────────────────────
         # raw_pregnancy_records.pregnancy_id → mother_journeys.pregnancy_id
         # (pregnancy_id is the PK of mother_journeys)
         """
@@ -683,7 +855,21 @@ def apply_indexes(engine):
         "CREATE INDEX IF NOT EXISTS idx_village_ind_dist_block ON village_indicators_monthly (district_code_lgd, block_code_lgd);",
         "CREATE INDEX IF NOT EXISTS idx_village_ind_yearmonth  ON village_indicators_monthly (year_month);",
 
-        # --- Geography code lookups ---
+        # --- Geographic LGD code lookups (also serve as FK-backing indexes) ---
+        "CREATE INDEX IF NOT EXISTS idx_districts_lgd_dist    ON districts    (lgd_districtcode);",
+        "CREATE INDEX IF NOT EXISTS idx_districts_lgd_state   ON districts    (lgd_statecode);",
+        "CREATE INDEX IF NOT EXISTS idx_subdistr_lgd_sub      ON subdistricts (lgd_subdistrictcode);",
+        "CREATE INDEX IF NOT EXISTS idx_subdistr_lgd_dist     ON subdistricts (lgd_districtcode);",
+        "CREATE INDEX IF NOT EXISTS idx_vill_poly_lgd_sub     ON villages_poly  (lgd_subdistrictcode);",
+        "CREATE INDEX IF NOT EXISTS idx_vill_poly_lgd_dist    ON villages_poly  (lgd_districtcode);",
+        "CREATE INDEX IF NOT EXISTS idx_vill_poly_lgd_vil     ON villages_poly  (lgd_villagecode);",
+        "CREATE INDEX IF NOT EXISTS idx_vill_point_lgd_sub    ON villages_point (lgd_subdistrictcode);",
+        "CREATE INDEX IF NOT EXISTS idx_vill_point_lgd_dist   ON villages_point (lgd_districtcode);",
+        "CREATE INDEX IF NOT EXISTS idx_vill_point_lgd_vil    ON villages_point (lgd_villagecode);",
+        "CREATE INDEX IF NOT EXISTS idx_blocks_district        ON blocks (district);",
+        "CREATE INDEX IF NOT EXISTS idx_dist_boundary_district ON district_boundaries (district);",
+
+        # --- Master reference code lookups ---
         "CREATE INDEX IF NOT EXISTS idx_master_blocks_dist_code ON master_blocks (district_code_lgd);",
         "CREATE INDEX IF NOT EXISTS idx_master_vil_block_code   ON master_villages (block_code_lgd);",
         "CREATE INDEX IF NOT EXISTS idx_master_vil_dist_code    ON master_villages (district_code_lgd);",
@@ -727,6 +913,89 @@ def apply_indexes(engine):
         "CREATE INDEX IF NOT EXISTS idx_anganwadi_dist         ON anganwadi_centres (district_code);",
     ]
     _exec_sql(engine, statements, "indexes")
+
+
+def apply_spatial_enrichment(engine):
+    """
+    Add geom GEOMETRY(POINT,4326) columns to master reference tables and populate
+    them from the corresponding PostGIS geo tables.
+
+    Enrichment sources:
+      master_districts       ← ST_Centroid(districts.geometry)     via lgd_districtcode
+      master_blocks          ← ST_Centroid(subdistricts.geometry)  via district code + block name
+      master_villages        ← villages_point.geometry             via lgd_villagecode (exact match)
+                               fallback: ST_Centroid(subdistricts) for unmatched villages
+      master_health_facilities ← health_facilities.geom            via facility_id
+    """
+    logger.info("Applying spatial enrichment to master tables…")
+
+    # Step A: Add geom columns (idempotent — IF NOT EXISTS)
+    _exec_sql(engine, [
+        "ALTER TABLE master_districts        ADD COLUMN IF NOT EXISTS geom geometry(Point,4326);",
+        "ALTER TABLE master_blocks           ADD COLUMN IF NOT EXISTS geom geometry(Point,4326);",
+        "ALTER TABLE master_villages         ADD COLUMN IF NOT EXISTS geom geometry(Point,4326);",
+        "ALTER TABLE master_health_facilities ADD COLUMN IF NOT EXISTS geom geometry(Point,4326);",
+    ], "spatial_enrich_add_cols")
+
+    # Step B: Populate via UPDATE — each in its own transaction for error isolation
+    updates = [
+        ("master_districts ← district polygon centroid", """
+            UPDATE master_districts md
+            SET    geom = ST_Centroid(d.geometry)::geometry(Point,4326)
+            FROM   districts d
+            WHERE  md.district_code_lgd = d.lgd_districtcode;
+        """),
+        # LGD block code ≠ LGD subdistrict code; join on district LGD code + block name
+        ("master_blocks ← subdistrict polygon centroid", """
+            UPDATE master_blocks mb
+            SET    geom = ST_Centroid(s.geometry)::geometry(Point,4326)
+            FROM   subdistricts s
+            WHERE  mb.district_code_lgd            = s.lgd_districtcode
+              AND  UPPER(TRIM(mb.block_name))       = UPPER(TRIM(s.blockname));
+        """),
+        # Exact LGD village code match → village representative point
+        ("master_villages (matched) ← villages_point geometry", """
+            UPDATE master_villages mv
+            SET    geom = vp.geometry::geometry(Point,4326)
+            FROM   villages_point vp
+            WHERE  mv.village_code_lgd = vp.lgd_villagecode
+              AND  mv.village_code_lgd IS NOT NULL;
+        """),
+        # Unmatched villages (lgd_villagecode NULL) → centroid of their block polygon
+        ("master_villages (unmatched) ← block centroid fallback", """
+            UPDATE master_villages mv
+            SET    geom = ST_Centroid(s.geometry)::geometry(Point,4326)
+            FROM   subdistricts s
+            JOIN   master_blocks mb
+                   ON  mb.block_code_lgd         = mv.block_code_lgd
+                   AND mb.district_code_lgd       = s.lgd_districtcode
+                   AND UPPER(TRIM(mb.block_name)) = UPPER(TRIM(s.blockname))
+            WHERE  mv.geom IS NULL;
+        """),
+        # GPS point from the health_facilities infrastructure table (same facility_id)
+        ("master_health_facilities ← health_facilities geom", """
+            UPDATE master_health_facilities mhf
+            SET    geom = hf.geom::geometry(Point,4326)
+            FROM   health_facilities hf
+            WHERE  mhf.facility_id = hf.facility_id
+              AND  hf.geom IS NOT NULL;
+        """),
+    ]
+    for label, sql in updates:
+        try:
+            with engine.begin() as conn:
+                result = conn.execute(text(sql))
+                logger.info(f"  [spatial_enrich] {label}: {result.rowcount} rows updated")
+        except Exception as exc:
+            logger.warning(f"  [spatial_enrich] skipped '{label}': {exc!s:.160}")
+
+    # Step C: GIST indexes on the new geom columns
+    _exec_sql(engine, [
+        "CREATE INDEX IF NOT EXISTS idx_master_districts_geom    ON master_districts         USING GIST (geom);",
+        "CREATE INDEX IF NOT EXISTS idx_master_blocks_geom       ON master_blocks            USING GIST (geom);",
+        "CREATE INDEX IF NOT EXISTS idx_master_villages_geom     ON master_villages          USING GIST (geom);",
+        "CREATE INDEX IF NOT EXISTS idx_master_hf_geom           ON master_health_facilities USING GIST (geom);",
+    ], "spatial_enrich_indexes")
 
 
 def apply_comments(engine):
@@ -813,17 +1082,45 @@ def apply_comments(engine):
             "mother_id": "Join key to mother_journeys.mother_id (indexed; no FK constraint because mother_id is non-unique in mother_journeys).",
             "visit_date":"Date of ANC visit. Indexed for time-series queries.",
         },
-        "villages_point": {
-            "geometry": "PostGIS POINT (EPSG:4326). Village representative GPS point.",
-        },
-        "villages_poly": {
-            "geometry": "PostGIS POLYGON (EPSG:4326). Village boundary polygon.",
+        "states": {
+            "id":            "Primary key (renamed from objectid). GIS feature identifier from source GeoJSON.",
+            "lgd_statecode": "LGD state census code. UNIQUE — FK target for districts.lgd_statecode.",
+            "geometry":      "PostGIS MULTIPOLYGON (EPSG:4326). State boundary.",
         },
         "districts": {
-            "geometry": "PostGIS MULTIPOLYGON (EPSG:4326). District boundary.",
+            "id":               "Primary key (renamed from objectid). GIS feature identifier.",
+            "lgd_districtcode": "LGD district census code. UNIQUE (1 NULL allowed). FK target for subdistricts and villages.",
+            "lgd_statecode":    "LGD state code. FK → states.lgd_statecode.",
+            "geometry":         "PostGIS MULTIPOLYGON (EPSG:4326). District boundary.",
+        },
+        "district_boundaries": {
+            "id":      "Primary key (renamed from objectid_1). GIS feature identifier.",
+            "geometry":"PostGIS MULTIPOLYGON (EPSG:4326). District boundary (2021 delineation).",
+        },
+        "subdistricts": {
+            "id":                  "Primary key (renamed from objectid). GIS feature identifier.",
+            "lgd_subdistrictcode": "LGD subdistrict (block) census code. UNIQUE. FK target for villages.",
+            "lgd_districtcode":    "LGD district code. FK → districts.lgd_districtcode.",
+            "geometry":            "PostGIS MULTIPOLYGON (EPSG:4326). Subdistrict boundary.",
         },
         "blocks": {
-            "geometry": "PostGIS MULTIPOLYGON (EPSG:4326). Block boundary.",
+            "id":      "Primary key (renamed from objectid). GIS feature identifier.",
+            "district":"District name (free-text). No LGD code in source — join to districts by name.",
+            "geometry":"PostGIS MULTIPOLYGON (EPSG:4326). Block boundary.",
+        },
+        "villages_poly": {
+            "id":                  "Primary key (renamed from objectid). GIS feature identifier.",
+            "lgd_villagecode":     "LGD village census code. Nullable (95 unmatched villages have NULL). No UNIQUE constraint.",
+            "lgd_subdistrictcode": "LGD subdistrict code. FK → subdistricts.lgd_subdistrictcode.",
+            "lgd_districtcode":    "LGD district code. FK → districts.lgd_districtcode.",
+            "geometry":            "PostGIS POLYGON (EPSG:4326). Village boundary polygon.",
+        },
+        "villages_point": {
+            "id":                  "Primary key (renamed from objectid). GIS feature identifier.",
+            "lgd_villagecode":     "LGD village census code. Nullable (91 unmatched villages have NULL). No UNIQUE constraint.",
+            "lgd_subdistrictcode": "LGD subdistrict code. FK → subdistricts.lgd_subdistrictcode.",
+            "lgd_districtcode":    "LGD district code. FK → districts.lgd_districtcode.",
+            "geometry":            "PostGIS POINT (EPSG:4326). Village representative GPS point.",
         },
         "health_facilities": {
             "geom":      "PostGIS POINT (EPSG:4326). Facility GPS location.",
@@ -848,10 +1145,26 @@ def apply_comments(engine):
             "mother_id":    "Extracted from JSON for indexing.",
             "pregnancy_id": "Pregnancy ID in format <mother_id>-<sno>. FK → mother_journeys.pregnancy_id.",
         },
+        "master_districts": {
+            "district_code_lgd": "Primary key — LGD district code. FK → districts.lgd_districtcode.",
+            "geom":              "Centroid of the district polygon (from districts.geometry). EPSG:4326 POINT.",
+        },
+        "master_blocks": {
+            "block_code_lgd":    "Primary key — LGD block code.",
+            "district_code_lgd": "FK → master_districts.district_code_lgd and districts.lgd_districtcode.",
+            "geom":              "Centroid of the matching subdistrict polygon (joined by block name + district LGD code). EPSG:4326 POINT.",
+        },
         "master_villages": {
-            "village_id":        "Primary key, format: 'V-NNNNN'.",
-            "village_code_lgd":  "LGD village census code (NULL if unmatched).",
-            "match_confidence":  "LGD matching quality: 'exact' or 'unmatched'.",
+            "village_id":       "Primary key, format: 'V-NNNNN'.",
+            "village_code_lgd": "LGD village census code (NULL if unmatched). Soft join → villages_point.lgd_villagecode.",
+            "match_confidence": "LGD matching quality: 'exact' or 'unmatched'.",
+            "geom":             "EPSG:4326 POINT. Exact match: from villages_point via lgd_villagecode. Unmatched: block centroid fallback.",
+        },
+        "master_health_facilities": {
+            "facility_id":       "Primary key — unique facility identifier. FK target from master_villages.",
+            "block_code_lgd":    "FK → master_blocks.block_code_lgd.",
+            "district_code_lgd": "FK → master_districts.district_code_lgd and districts.lgd_districtcode.",
+            "geom":              "GPS point from health_facilities.geom (matched via facility_id). EPSG:4326 POINT.",
         },
         "nfhs_indicators": {
             "nfhs_round":   "NFHS survey round (3, 4, or 5).",
@@ -1024,6 +1337,7 @@ def run_migration(args):
         apply_primary_keys(engine)
         apply_foreign_keys(engine)
         apply_indexes(engine)
+        apply_spatial_enrichment(engine)
         apply_comments(engine)
 
     logger.info("Migration complete!")
