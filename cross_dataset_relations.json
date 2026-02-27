@@ -4,34 +4,6 @@
       "child": {
         "type": "alloydb",
         "dataset": "mecdm_superapp_db",
-        "table": "raw_anc_records",
-        "column": "pregnancy_id"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "mother_journeys",
-        "column": "pregnancy_id"
-      }
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "raw_child_records",
-        "column": "pregnancy_id"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "mother_journeys",
-        "column": "pregnancy_id"
-      }
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
         "table": "raw_pregnancy_records",
         "column": "pregnancy_id"
       },
@@ -40,7 +12,9 @@
         "dataset": "mecdm_superapp_db",
         "table": "mother_journeys",
         "column": "pregnancy_id"
-      }
+      },
+      "enforced": true,
+      "note": "DB-enforced FK. pregnancy_id is the PRIMARY KEY of mother_journeys."
     },
     {
       "child": {
@@ -54,7 +28,89 @@
         "dataset": "mecdm_superapp_db",
         "table": "mother_journeys",
         "column": "mother_id"
-      }
+      },
+      "enforced": false,
+      "note": "Logical join only — NOT a DB FK. mother_journeys has one row per pregnancy so mother_id is non-unique (a mother with 2 pregnancies has 2 rows). Join: anc_visits.mother_id = mother_journeys.mother_id returns all ANC visits for all pregnancies of that mother."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "raw_anc_records",
+        "column": "mother_id"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "mother_journeys",
+        "column": "mother_id"
+      },
+      "enforced": false,
+      "note": "Logical join via mother_id. pregnancy_id column may be absent from raw_anc_records (not present in source API response)."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "raw_child_records",
+        "column": "mother_id"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "mother_journeys",
+        "column": "mother_id"
+      },
+      "enforced": false,
+      "note": "Logical join via mother_id. pregnancy_id column may be absent from raw_child_records (not present in source API response)."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_blocks",
+        "column": "district_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_districts",
+        "column": "district_code_lgd"
+      },
+      "enforced": false,
+      "note": "Geographic hierarchy: blocks belong to districts. Use LGD codes to join health data to geographic boundaries."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_villages",
+        "column": "block_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_blocks",
+        "column": "block_code_lgd"
+      },
+      "enforced": false,
+      "note": "Geographic hierarchy: villages belong to blocks."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "village_indicators_monthly",
+        "column": "block_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_blocks",
+        "column": "block_code_lgd"
+      },
+      "enforced": false,
+      "note": "Join monthly health indicators to geographic hierarchy via LGD block code."
     }
   ]
 }

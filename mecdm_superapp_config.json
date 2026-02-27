@@ -3,39 +3,188 @@
     {
       "type": "alloydb",
       "name": "mecdm_superapp_db",
-      "description": "PostgreSQL AlloyDB dataset containing Meghalaya Early Childhood Development Mission (MECDM) geographic boundaries, health facilities, maternal and child tracking records, and demographic indicators."
+      "description": "PostgreSQL/AlloyDB dataset for the Meghalaya Early Childhood Development Mission (MECDM) SuperApp. Contains 25 tables across six categories: (1) PostGIS geographic boundaries at state/district/block/village level; (2) canonical master-reference tables keyed by LGD codes; (3) health infrastructure with GPS points; (4) maternal-child health tracking (mother_journeys is the central fact table, keyed by pregnancy_id — one row per pregnancy, so a mother with multiple pregnancies has multiple rows with the same mother_id); (5) raw API JSON records normalized into relational tables; (6) survey and reference data (NFHS, videos, research). Geography hierarchy: states → districts (12) → blocks (46) → villages (~6,862). Health hierarchy: mother_journeys → anc_visits (via mother_id); mother_journeys → raw_pregnancy_records (via pregnancy_id FK). Use LGD codes (district_code_lgd, block_code_lgd, village_code_lgd) to join health data to geographic tables. Spatial queries use PostGIS — geometry column on GeoJSON-sourced tables, geom column on CSV-sourced point tables (health_facilities, anganwadi_centres). All geometries are EPSG:4326 (WGS84).",
+      "tables": [
+        {
+          "name": "mother_journeys",
+          "description": "Central fact table. One row per pregnancy (NOT per mother). A mother with multiple pregnancies has multiple rows sharing the same mother_id. Covers registration, all ANC visit summaries, delivery outcome, and child outcome in a single denormalised row. ~363,898 rows.",
+          "primary_key": "pregnancy_id",
+          "key_columns": ["mother_id", "pregnancy_id", "district", "block", "village", "registration_date", "delivery_date", "pregnancy_status", "high_risk_at_registration", "delivery_category", "delivery_type", "maternal_death", "baby_weight_kg", "baby_gender", "infant_death", "low_birth_weight", "severe_anemia", "gps_location"],
+          "notes": "mother_id is non-unique. pregnancy_id format: '{mother_id} - {sno}'. gps_location stores WKT string — use ST_GeomFromText(gps_location, 4326) to convert."
+        },
+        {
+          "name": "anc_visits",
+          "description": "Individual Antenatal Care visit records with clinical measurements. ~361,551 rows. Join to mother_journeys via mother_id.",
+          "primary_key": "anc_id",
+          "key_columns": ["anc_id", "mother_id", "visit_num", "anc_visit_number", "district", "block", "village", "visit_date", "gestational_age_weeks", "weight_kg", "bp_systolic", "bp_diastolic", "haemoglobin", "foetal_heart_rate", "tt_given", "ifa_given", "calcium_given", "high_risk_factors", "danger_signs"],
+          "notes": "Join to mother_journeys: anc_visits.mother_id = mother_journeys.mother_id (logical join, not enforced FK — mother_id is non-unique in mother_journeys)."
+        },
+        {
+          "name": "village_indicators_monthly",
+          "description": "Monthly aggregated maternal and child health indicators at village level. ~133,071 rows. Key table for time-series analytics.",
+          "primary_key": null,
+          "key_columns": ["district_code_lgd", "district_name", "block_code_lgd", "block_name", "village_name", "year_month", "total_registrations", "reg_1st_trimester", "total_deliveries", "institutional_deliveries", "maternal_deaths", "infant_deaths", "neonatal_deaths", "total_anc_visits", "ifa_recipients", "high_risk_registrations"],
+          "notes": "year_month format: 'YYYY-MM'. Join to master_blocks via block_code_lgd."
+        },
+        {
+          "name": "raw_pregnancy_records",
+          "description": "Raw API JSON response records for pregnancy journeys, normalized to relational columns. ~363K rows. Source of truth for all pregnancy fields. FK to mother_journeys via pregnancy_id.",
+          "primary_key": "row_id",
+          "key_columns": ["row_id", "mother_id", "pregnancy_id", "district", "block", "registration_date", "delivery_date", "pregnancy_status", "delivery_cat_1", "lmp", "edd"],
+          "notes": "pregnancy_id FK → mother_journeys.pregnancy_id (enforced). Contains all raw API fields not present in mother_journeys CSV."
+        },
+        {
+          "name": "raw_anc_records",
+          "description": "Raw API JSON response records for individual ANC visits, normalized to relational columns. ~361,508 rows.",
+          "primary_key": "row_id",
+          "key_columns": ["row_id", "mother_id", "anc_id", "visit_num", "visit_date", "district", "block"],
+          "notes": "pregnancy_id column may be absent (not in source API). Join to mother_journeys via mother_id."
+        },
+        {
+          "name": "raw_child_records",
+          "description": "Raw API JSON response records for child/infant data, normalized to relational columns.",
+          "primary_key": "row_id",
+          "key_columns": ["row_id", "mother_id", "child_id", "dob", "baby_gender", "baby_weight_kg", "district", "block"],
+          "notes": "pregnancy_id column may be absent. Join to mother_journeys via mother_id."
+        },
+        {
+          "name": "states",
+          "description": "Meghalaya state polygon (1 feature). PostGIS geometry column: 'geometry'. Contains Census 2011 state-level demographic attributes.",
+          "primary_key": null,
+          "key_columns": ["geometry"],
+          "notes": "Spatial queries: ST_Within, ST_Intersects etc. Use SRID 4326."
+        },
+        {
+          "name": "districts",
+          "description": "Meghalaya district polygons (12 features) with Census 2011 demographics (rural/urban split, workers, SC/ST populations). PostGIS geometry column: 'geometry'.",
+          "primary_key": null,
+          "key_columns": ["geometry"],
+          "notes": "Join to master_districts for LGD codes."
+        },
+        {
+          "name": "district_boundaries",
+          "description": "Meghalaya district boundary polygons using 2021 delineation (12 features) with area_sqkm and length attributes. PostGIS geometry column: 'geometry'.",
+          "primary_key": null,
+          "key_columns": ["geometry"],
+          "notes": "Use for spatial containment queries with 2021 boundaries."
+        },
+        {
+          "name": "subdistricts",
+          "description": "Sub-district (block) polygons (46 features) with Census demographics and agricultural data. PostGIS geometry column: 'geometry'.",
+          "primary_key": null,
+          "key_columns": ["geometry"],
+          "notes": "Corresponds to blocks in health data. Join via block name."
+        },
+        {
+          "name": "blocks",
+          "description": "Block boundary polygons (46 features) with area and length measurements. PostGIS geometry column: 'geometry'.",
+          "primary_key": null,
+          "key_columns": ["geometry"],
+          "notes": "Administrative blocks — the primary sub-district unit in MECDM data."
+        },
+        {
+          "name": "villages_poly",
+          "description": "Village boundary polygons for ~6,862 Meghalaya villages with Census 2011 demographics. PostGIS geometry column: 'geometry'.",
+          "primary_key": null,
+          "key_columns": ["geometry"],
+          "notes": "Use for spatial aggregations. Join to master_villages via village name or LGD code."
+        },
+        {
+          "name": "villages_point",
+          "description": "Village representative GPS points for ~6,862 villages with Census 2011 data. PostGIS geometry column: 'geometry'.",
+          "primary_key": null,
+          "key_columns": ["geometry"],
+          "notes": "Use for point-in-polygon queries (e.g. which block does a village fall in)."
+        },
+        {
+          "name": "master_districts",
+          "description": "Canonical district reference table with LGD (Local Government Directory) codes. 12 districts.",
+          "primary_key": "district_code_lgd",
+          "key_columns": ["district_code_lgd", "district_name"],
+          "notes": "Reference for normalizing district_name strings in health tables."
+        },
+        {
+          "name": "master_blocks",
+          "description": "Canonical block reference with LGD codes and parent district. 47 blocks.",
+          "primary_key": "block_code_lgd",
+          "key_columns": ["block_code_lgd", "block_name", "district_code_lgd", "district_name"],
+          "notes": "FK: district_code_lgd → master_districts."
+        },
+        {
+          "name": "master_villages",
+          "description": "Village reference with LGD matching status (~7,430 villages). match_confidence is 'exact' or 'unmatched'.",
+          "primary_key": "village_id",
+          "key_columns": ["village_id", "village_name", "village_code_lgd", "lgd_village_name", "match_confidence", "facility_id", "block_code_lgd", "district_code_lgd"],
+          "notes": "village_id format: 'V-NNNNN'. Many villages are 'unmatched' for LGD codes."
+        },
+        {
+          "name": "master_health_facilities",
+          "description": "Health facility reference: PHCs, Sub-centres, and Other Public Facilities (~1,799 facilities).",
+          "primary_key": "facility_id",
+          "key_columns": ["facility_id", "phc_name", "subcentre_name", "facility_type", "block_code_lgd", "district_code_lgd"],
+          "notes": "facility_id format: 'HF-NNNNN'. facility_type values: PHC, Sub-Center, Other Public Facility."
+        },
+        {
+          "name": "geo_full_mapping",
+          "description": "Complete geographic hierarchy mapping: district → block → facility → village with LGD match confidence.",
+          "primary_key": null,
+          "key_columns": ["district_code_lgd", "district_name", "block_code_lgd", "block_name", "facility_id", "phc_name", "subcentre_name", "village_id", "village_name", "match_confidence"],
+          "notes": "Use for hierarchical aggregation queries across all levels."
+        },
+        {
+          "name": "geo_match_report",
+          "description": "Quality report for village-to-LGD code matching.",
+          "primary_key": null,
+          "key_columns": ["village_id", "village_name", "village_code_lgd", "lgd_village_name", "match_confidence"],
+          "notes": "Diagnostic table — shows which villages could not be matched to LGD codes."
+        },
+        {
+          "name": "health_facilities",
+          "description": "Health facility directory enriched with GPS coordinates. PostGIS POINT in 'geom' column. ~646 facilities.",
+          "primary_key": null,
+          "key_columns": ["facility_id", "facility_name", "facility_type", "district", "district_code", "block", "block_code", "latitude", "longitude", "geom"],
+          "notes": "geom is PostGIS POINT(lon lat) EPSG:4326. Spatial join with geographic tables to find nearest facility."
+        },
+        {
+          "name": "anganwadi_centres",
+          "description": "ICDS Anganwadi Centre directory with GPS, infrastructure (water, toilet, building type), and administrative data (~5,900 centres). PostGIS POINT in 'geom' column.",
+          "primary_key": null,
+          "key_columns": ["anganwadi_centre_id", "anganwadi_centre_name", "district_name", "district_code", "block_name", "block_code", "village_name", "latitude", "longitude", "geom", "status", "no_of_days_open"],
+          "notes": "geom is PostGIS POINT EPSG:4326. geometry_x = longitude, geometry_y = latitude (duplicate columns)."
+        },
+        {
+          "name": "meghealth_geo_mapping",
+          "description": "Facility-to-village mapping used in Meghealth: district → block → PHC → sub-centre → village hierarchy.",
+          "primary_key": null,
+          "key_columns": ["district", "district_code_lgd", "block", "phc", "subcentre", "facility_type", "village"],
+          "notes": "Text-based mapping — join to master tables via name or LGD code for numeric keys."
+        },
+        {
+          "name": "nfhs_indicators",
+          "description": "National Family Health Survey (NFHS) rounds 3/4/5 district-level health indicators. 624 records.",
+          "primary_key": "id",
+          "key_columns": ["id", "indicator_category", "indicator_name", "nfhs_round", "survey_year", "district", "urban", "rural", "total", "unit"],
+          "notes": "nfhs_round values: 3 (2005-06), 4 (2015-16), 5 (2019-21). Compare rounds to show trend."
+        },
+        {
+          "name": "video_library",
+          "description": "Educational video metadata for ASHA/ANM health workers (~49 videos on breastfeeding, nutrition, immunization etc).",
+          "primary_key": "id",
+          "key_columns": ["id", "title", "category", "duration_min", "description", "tags", "health_indicators", "target_audience", "youtube_id"],
+          "notes": "tags, health_indicators, target_audience stored as JSON strings. category values: BREASTFEEDING, NUTRITION, IMMUNIZATION etc."
+        },
+        {
+          "name": "research_articles",
+          "description": "Peer-reviewed research articles on maternal and child health in Meghalaya/Northeast India. 23 articles.",
+          "primary_key": "id",
+          "key_columns": ["id", "title", "authors", "year", "journal", "geographic_scope", "study_type", "key_findings", "relevant_indicators"],
+          "notes": "key_findings and relevant_indicators stored as JSON strings."
+        }
+      ]
     }
   ],
   "cross_dataset_relations": {
     "foreign_keys": [
-      {
-        "child": {
-          "type": "alloydb",
-          "dataset": "mecdm_superapp_db",
-          "table": "raw_anc_records",
-          "column": "pregnancy_id"
-        },
-        "parent": {
-          "type": "alloydb",
-          "dataset": "mecdm_superapp_db",
-          "table": "mother_journeys",
-          "column": "pregnancy_id"
-        }
-      },
-      {
-        "child": {
-          "type": "alloydb",
-          "dataset": "mecdm_superapp_db",
-          "table": "raw_child_records",
-          "column": "pregnancy_id"
-        },
-        "parent": {
-          "type": "alloydb",
-          "dataset": "mecdm_superapp_db",
-          "table": "mother_journeys",
-          "column": "pregnancy_id"
-        }
-      },
       {
         "child": {
           "type": "alloydb",
@@ -48,7 +197,9 @@
           "dataset": "mecdm_superapp_db",
           "table": "mother_journeys",
           "column": "pregnancy_id"
-        }
+        },
+        "enforced": true,
+        "note": "DB-enforced FK. pregnancy_id is the PK of mother_journeys."
       },
       {
         "child": {
@@ -62,7 +213,89 @@
           "dataset": "mecdm_superapp_db",
           "table": "mother_journeys",
           "column": "mother_id"
-        }
+        },
+        "enforced": false,
+        "note": "Logical join — not a DB FK because mother_id is non-unique in mother_journeys (one row per pregnancy, not per mother). Use: anc_visits.mother_id = mother_journeys.mother_id. To get all ANC visits for a specific pregnancy, join via pregnancy_id through the shared mother_id."
+      },
+      {
+        "child": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "raw_anc_records",
+          "column": "mother_id"
+        },
+        "parent": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "mother_journeys",
+          "column": "mother_id"
+        },
+        "enforced": false,
+        "note": "Logical join via mother_id. pregnancy_id column may be absent in raw_anc_records depending on source data."
+      },
+      {
+        "child": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "raw_child_records",
+          "column": "mother_id"
+        },
+        "parent": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "mother_journeys",
+          "column": "mother_id"
+        },
+        "enforced": false,
+        "note": "Logical join via mother_id. pregnancy_id column may be absent in raw_child_records depending on source data."
+      },
+      {
+        "child": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "master_blocks",
+          "column": "district_code_lgd"
+        },
+        "parent": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "master_districts",
+          "column": "district_code_lgd"
+        },
+        "enforced": false,
+        "note": "Logical hierarchy: blocks belong to districts via LGD code."
+      },
+      {
+        "child": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "master_villages",
+          "column": "block_code_lgd"
+        },
+        "parent": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "master_blocks",
+          "column": "block_code_lgd"
+        },
+        "enforced": false,
+        "note": "Logical hierarchy: villages belong to blocks via LGD code."
+      },
+      {
+        "child": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "village_indicators_monthly",
+          "column": "block_code_lgd"
+        },
+        "parent": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "master_blocks",
+          "column": "block_code_lgd"
+        },
+        "enforced": false,
+        "note": "Join monthly indicators to geographic hierarchy via LGD block code."
       }
     ]
   }

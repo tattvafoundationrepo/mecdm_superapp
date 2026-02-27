@@ -177,13 +177,18 @@ def create_extensions(engine):
 
 
 def _exec_sql(engine, statements: list[str], label: str):
-    """Execute a list of SQL statements, logging warnings on failure."""
-    with engine.begin() as conn:
-        for sql in statements:
-            try:
+    """
+    Execute each SQL statement in its own transaction.
+
+    A single failed statement (e.g. duplicate key, missing column) does NOT
+    abort subsequent statements because each runs in an isolated transaction.
+    """
+    for sql in statements:
+        try:
+            with engine.begin() as conn:
                 conn.execute(text(sql))
-            except Exception as exc:
-                logger.warning(f"[{label}] skipped: {exc!s:.120}")
+        except Exception as exc:
+            logger.warning(f"[{label}] skipped: {exc!s:.120}")
 
 
 def drop_tables(engine, tables: list[str]):
@@ -560,8 +565,10 @@ def apply_primary_keys(engine):
         "ALTER TABLE master_villages ADD PRIMARY KEY (village_id);",
         "ALTER TABLE master_health_facilities ADD PRIMARY KEY (facility_id);",
         # Core health data
-        "ALTER TABLE mother_journeys ADD PRIMARY KEY (mother_id);",
-        "ALTER TABLE mother_journeys ADD CONSTRAINT uq_pregnancy_id UNIQUE (pregnancy_id);",
+        # mother_journeys has one row per PREGNANCY (a mother appears multiple
+        # times for successive pregnancies), so pregnancy_id is the true PK.
+        # mother_id is non-unique and gets only an index (see apply_indexes).
+        "ALTER TABLE mother_journeys ADD PRIMARY KEY (pregnancy_id);",
         "ALTER TABLE anc_visits ADD PRIMARY KEY (anc_id);",
         # Raw records — surrogate serial key (natural keys may have duplicates/nulls)
         "ALTER TABLE raw_anc_records ADD COLUMN row_id SERIAL PRIMARY KEY;",
@@ -578,36 +585,16 @@ def apply_primary_keys(engine):
 def apply_foreign_keys(engine):
     """
     Add foreign key constraints per cross_dataset_relations.json.
-    Each constraint is attempted independently; failures are logged but non-fatal
-    because source data may have referential gaps.
+
+    Each constraint runs in its own transaction so one failure does not block
+    the rest.  anc_visits → mother_journeys is expressed as an index-only
+    relationship (no FK constraint) because mother_id is not unique in
+    mother_journeys (one row per pregnancy, not per mother).
     """
     logger.info("Applying foreign key constraints…")
     fk_statements = [
-        # anc_visits.mother_id → mother_journeys.mother_id
-        """
-        ALTER TABLE anc_visits
-          ADD CONSTRAINT fk_anc_mother_id
-          FOREIGN KEY (mother_id)
-          REFERENCES mother_journeys(mother_id)
-          ON DELETE CASCADE;
-        """,
-        # raw_anc_records.pregnancy_id → mother_journeys.pregnancy_id
-        """
-        ALTER TABLE raw_anc_records
-          ADD CONSTRAINT fk_raw_anc_pregnancy_id
-          FOREIGN KEY (pregnancy_id)
-          REFERENCES mother_journeys(pregnancy_id)
-          ON DELETE CASCADE;
-        """,
-        # raw_child_records.pregnancy_id → mother_journeys.pregnancy_id
-        """
-        ALTER TABLE raw_child_records
-          ADD CONSTRAINT fk_raw_child_pregnancy_id
-          FOREIGN KEY (pregnancy_id)
-          REFERENCES mother_journeys(pregnancy_id)
-          ON DELETE CASCADE;
-        """,
         # raw_pregnancy_records.pregnancy_id → mother_journeys.pregnancy_id
+        # (pregnancy_id is the PK of mother_journeys)
         """
         ALTER TABLE raw_pregnancy_records
           ADD CONSTRAINT fk_raw_preg_pregnancy_id
@@ -615,13 +602,50 @@ def apply_foreign_keys(engine):
           REFERENCES mother_journeys(pregnancy_id)
           ON DELETE CASCADE;
         """,
+        # raw_anc_records.pregnancy_id → mother_journeys.pregnancy_id
+        # (only if the column exists — raw ANC JSON may not include pregnancy_id)
+        """
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name   = 'raw_anc_records'
+              AND column_name  = 'pregnancy_id'
+          ) THEN
+            ALTER TABLE raw_anc_records
+              ADD CONSTRAINT fk_raw_anc_pregnancy_id
+              FOREIGN KEY (pregnancy_id)
+              REFERENCES mother_journeys(pregnancy_id)
+              ON DELETE CASCADE;
+          END IF;
+        END $$;
+        """,
+        # raw_child_records.pregnancy_id → mother_journeys.pregnancy_id
+        """
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name   = 'raw_child_records'
+              AND column_name  = 'pregnancy_id'
+          ) THEN
+            ALTER TABLE raw_child_records
+              ADD CONSTRAINT fk_raw_child_pregnancy_id
+              FOREIGN KEY (pregnancy_id)
+              REFERENCES mother_journeys(pregnancy_id)
+              ON DELETE CASCADE;
+          END IF;
+        END $$;
+        """,
     ]
-    with engine.begin() as conn:
-        for sql in fk_statements:
-            try:
+    for sql in fk_statements:
+        try:
+            with engine.begin() as conn:
                 conn.execute(text(sql))
-            except Exception as exc:
-                logger.warning(f"[foreign_keys] skipped: {exc!s:.160}")
+        except Exception as exc:
+            logger.warning(f"[foreign_keys] skipped: {exc!s:.160}")
 
 
 def apply_indexes(engine):
@@ -640,10 +664,12 @@ def apply_indexes(engine):
         "CREATE INDEX IF NOT EXISTS idx_anganwadi_geom       ON anganwadi_centres USING GIST (geom);",
 
         # --- Mother / pregnancy lookups ---
+        # pregnancy_id is the PK so its index is implicit; keep mother_id indexed
+        # for lookups that join on the mother (multiple pregnancies per mother).
+        "CREATE INDEX IF NOT EXISTS idx_mother_id            ON mother_journeys (mother_id);",
         "CREATE INDEX IF NOT EXISTS idx_mother_district_block ON mother_journeys (district, block);",
         "CREATE INDEX IF NOT EXISTS idx_mother_reg_date       ON mother_journeys (registration_date);",
         "CREATE INDEX IF NOT EXISTS idx_mother_delivery_date  ON mother_journeys (delivery_date);",
-        "CREATE INDEX IF NOT EXISTS idx_mother_pregnancy_id   ON mother_journeys (pregnancy_id);",
 
         # --- ANC visits ---
         "CREATE INDEX IF NOT EXISTS idx_anc_mother_id         ON anc_visits (mother_id);",
@@ -663,10 +689,28 @@ def apply_indexes(engine):
         "CREATE INDEX IF NOT EXISTS idx_full_map_dist_block     ON geo_full_mapping (district_code_lgd, block_code_lgd);",
 
         # --- Raw records — extracted FK columns ---
-        "CREATE INDEX IF NOT EXISTS idx_raw_anc_mother_id     ON raw_anc_records (mother_id);",
-        "CREATE INDEX IF NOT EXISTS idx_raw_anc_pregnancy_id  ON raw_anc_records (pregnancy_id);",
-        "CREATE INDEX IF NOT EXISTS idx_raw_child_mother_id   ON raw_child_records (mother_id);",
-        "CREATE INDEX IF NOT EXISTS idx_raw_child_pregnancy_id ON raw_child_records (pregnancy_id);",
+        # mother_id is always present; pregnancy_id may be absent in ANC/child
+        # records (raw JSON did not include it) so guard with a column check.
+        "CREATE INDEX IF NOT EXISTS idx_raw_anc_mother_id   ON raw_anc_records (mother_id);",
+        """
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_schema='public' AND table_name='raw_anc_records'
+                       AND column_name='pregnancy_id') THEN
+            CREATE INDEX IF NOT EXISTS idx_raw_anc_pregnancy_id ON raw_anc_records (pregnancy_id);
+          END IF;
+        END $$;
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_raw_child_mother_id  ON raw_child_records (mother_id);",
+        """
+        DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_schema='public' AND table_name='raw_child_records'
+                       AND column_name='pregnancy_id') THEN
+            CREATE INDEX IF NOT EXISTS idx_raw_child_pregnancy_id ON raw_child_records (pregnancy_id);
+          END IF;
+        END $$;
+        """,
         "CREATE INDEX IF NOT EXISTS idx_raw_preg_mother_id    ON raw_pregnancy_records (mother_id);",
         "CREATE INDEX IF NOT EXISTS idx_raw_preg_pregnancy_id ON raw_pregnancy_records (pregnancy_id);",
 
@@ -725,7 +769,7 @@ def apply_comments(engine):
             "Facility-to-village mapping: district → block → PHC → sub-centre → village hierarchy used in Meghealth.",
         # Health data
         "mother_journeys":
-            "Complete maternal journey from pregnancy registration through delivery and child outcome. ~363,898 records. PK: mother_id, UNIQUE: pregnancy_id.",
+            "Complete maternal journey from pregnancy registration through delivery and child outcome. ~363,898 records. PK: pregnancy_id. mother_id is non-unique (one row per pregnancy, not per mother).",
         "anc_visits":
             "Antenatal Care (ANC) visit records with clinical vitals (weight, BP, Hb), medications, and danger signs. ~361,551 records. PK: anc_id, FK: mother_id → mother_journeys.",
         "village_indicators_monthly":
@@ -749,9 +793,9 @@ def apply_comments(engine):
     col_comments = {
         "mother_journeys": {
             "mother_id":
-                "Unique identifier for the mother in the Meghealth system. Primary key.",
+                "Meghealth mother identifier. Non-unique — a mother has one row per pregnancy. Indexed for cross-pregnancy lookups.",
             "pregnancy_id":
-                "Pregnancy-specific composite ID, format: '{mother_id} - {sno}'. Referenced by raw_*_records tables.",
+                "Primary key. Composite ID, format: '{mother_id} - {sno}'. Referenced by raw_pregnancy_records via FK.",
             "gps_location":
                 "GPS location as WKT string (POINT lon lat). Convert to geometry with: ST_GeomFromText(gps_location, 4326).",
             "district":
@@ -761,7 +805,7 @@ def apply_comments(engine):
         },
         "anc_visits": {
             "anc_id":    "Unique ANC visit identifier. Primary key.",
-            "mother_id": "FK → mother_journeys.mother_id.",
+            "mother_id": "Join key to mother_journeys.mother_id (indexed; no FK constraint because mother_id is non-unique in mother_journeys).",
             "visit_date":"Date of ANC visit. Indexed for time-series queries.",
         },
         "villages_point": {
