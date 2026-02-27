@@ -597,9 +597,20 @@ def apply_primary_keys(engine):
     """Add primary keys and unique constraints to all tables."""
     logger.info("Applying primary keys and unique constraints…")
     statements = [
-        # ── Geo tables: 'id' column already loaded by load_geojson (objectid/objectid_1
-        # is renamed to 'id' in the GeoDataFrame before to_postgis, so no DDL rename needed)
-        # states — lgd_statecode is unique (1 state); needed as FK target for districts
+        # ── Type normalizations (must run before UNIQUE/FK constraints) ─────────
+        # states.lgd_statecode is loaded as TEXT ('17' string in GeoJSON); cast to
+        # BIGINT so it matches districts.lgd_statecode (integer in GeoJSON → BIGINT).
+        "ALTER TABLE states ALTER COLUMN lgd_statecode TYPE BIGINT USING lgd_statecode::BIGINT;",
+        # pandas loads integer columns with any NaN as FLOAT64 → DOUBLE PRECISION.
+        # Cast master table LGD code columns to BIGINT to match master_districts/
+        # master_blocks primary keys (which are loaded as BIGINT from int-only CSVs).
+        "ALTER TABLE master_villages ALTER COLUMN block_code_lgd TYPE BIGINT USING block_code_lgd::BIGINT;",
+        "ALTER TABLE master_villages ALTER COLUMN district_code_lgd TYPE BIGINT USING district_code_lgd::BIGINT;",
+        "ALTER TABLE master_health_facilities ALTER COLUMN block_code_lgd TYPE BIGINT USING block_code_lgd::BIGINT;",
+        "ALTER TABLE master_health_facilities ALTER COLUMN district_code_lgd TYPE BIGINT USING district_code_lgd::BIGINT;",
+
+        # ── Geo tables: 'id' column already loaded by load_geojson ─────────────
+        # states — lgd_statecode is unique (1 state); FK target for districts
         "ALTER TABLE states ADD PRIMARY KEY (id);",
         "ALTER TABLE states ADD CONSTRAINT uq_states_lgd_statecode UNIQUE (lgd_statecode);",
 
@@ -617,11 +628,12 @@ def apply_primary_keys(engine):
         # blocks — no LGD codes in source; PK only
         "ALTER TABLE blocks ADD PRIMARY KEY (id);",
 
-        # villages_poly — lgd_villagecode has NULLs + duplicates; no UNIQUE possible
-        "ALTER TABLE villages_poly ADD PRIMARY KEY (id);",
+        # villages_poly — objectid is NOT unique in source (duplicates found);
+        # use a SERIAL surrogate PK.  'id' column remains as a plain column.
+        "ALTER TABLE villages_poly ADD COLUMN gid SERIAL PRIMARY KEY;",
 
-        # villages_point
-        "ALTER TABLE villages_point ADD PRIMARY KEY (id);",
+        # villages_point — same situation
+        "ALTER TABLE villages_point ADD COLUMN gid SERIAL PRIMARY KEY;",
 
         # ── Master reference ───────────────────────────────────────────────────
         "ALTER TABLE master_districts ADD PRIMARY KEY (district_code_lgd);",
@@ -961,23 +973,25 @@ def apply_spatial_enrichment(engine):
             WHERE  mv.village_code_lgd = vp.lgd_villagecode
               AND  mv.village_code_lgd IS NOT NULL;
         """),
-        # Unmatched villages (lgd_villagecode NULL) → centroid of their block polygon
+        # Unmatched villages (lgd_villagecode NULL) → centroid of their block polygon.
+        # In PostgreSQL UPDATE...FROM, the target table alias cannot be referenced
+        # inside JOIN conditions.  Use comma-separated FROM + WHERE instead.
         ("master_villages (unmatched) ← block centroid fallback", """
             UPDATE master_villages mv
             SET    geom = ST_Centroid(s.geometry)::geometry(Point,4326)
-            FROM   subdistricts s
-            JOIN   master_blocks mb
-                   ON  mb.block_code_lgd         = mv.block_code_lgd
-                   AND mb.district_code_lgd       = s.lgd_districtcode
-                   AND UPPER(TRIM(mb.block_name)) = UPPER(TRIM(s.blockname))
-            WHERE  mv.geom IS NULL;
+            FROM   master_blocks mb, subdistricts s
+            WHERE  mv.geom IS NULL
+              AND  mv.block_code_lgd                = mb.block_code_lgd
+              AND  mb.district_code_lgd             = s.lgd_districtcode
+              AND  UPPER(TRIM(mb.block_name))        = UPPER(TRIM(s.blockname));
         """),
-        # GPS point from the health_facilities infrastructure table (same facility_id)
+        # GPS point from the health_facilities infrastructure table.
+        # health_facilities.facility_id may be BIGINT while master has TEXT; cast to TEXT.
         ("master_health_facilities ← health_facilities geom", """
             UPDATE master_health_facilities mhf
             SET    geom = hf.geom::geometry(Point,4326)
             FROM   health_facilities hf
-            WHERE  mhf.facility_id = hf.facility_id
+            WHERE  mhf.facility_id = hf.facility_id::TEXT
               AND  hf.geom IS NOT NULL;
         """),
     ]
@@ -1109,14 +1123,16 @@ def apply_comments(engine):
             "geometry":"PostGIS MULTIPOLYGON (EPSG:4326). Block boundary.",
         },
         "villages_poly": {
-            "id":                  "Primary key (renamed from objectid). GIS feature identifier.",
+            "gid":                 "Surrogate primary key (SERIAL). objectid from source is non-unique so a new PK is generated.",
+            "id":                  "Original objectid from GeoJSON (non-unique, kept for reference only).",
             "lgd_villagecode":     "LGD village census code. Nullable (95 unmatched villages have NULL). No UNIQUE constraint.",
             "lgd_subdistrictcode": "LGD subdistrict code. FK → subdistricts.lgd_subdistrictcode.",
             "lgd_districtcode":    "LGD district code. FK → districts.lgd_districtcode.",
             "geometry":            "PostGIS POLYGON (EPSG:4326). Village boundary polygon.",
         },
         "villages_point": {
-            "id":                  "Primary key (renamed from objectid). GIS feature identifier.",
+            "gid":                 "Surrogate primary key (SERIAL). objectid from source is non-unique so a new PK is generated.",
+            "id":                  "Original objectid from GeoJSON (non-unique, kept for reference only).",
             "lgd_villagecode":     "LGD village census code. Nullable (91 unmatched villages have NULL). No UNIQUE constraint.",
             "lgd_subdistrictcode": "LGD subdistrict code. FK → subdistricts.lgd_subdistrictcode.",
             "lgd_districtcode":    "LGD district code. FK → districts.lgd_districtcode.",

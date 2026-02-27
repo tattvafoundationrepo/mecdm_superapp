@@ -14,7 +14,7 @@
         "column": "pregnancy_id"
       },
       "enforced": true,
-      "note": "DB-enforced FK. pregnancy_id has a UNIQUE constraint (NULLs allowed) in mother_journeys; the actual PK is row_id (SERIAL). References mother_journeys(pregnancy_id) ON DELETE CASCADE."
+      "note": "Each raw pregnancy record belongs to a mother journey. Use when you need raw source fields not present in the summarised mother_journeys table."
     },
     {
       "child": {
@@ -30,7 +30,7 @@
         "column": "pregnancy_id"
       },
       "enforced": true,
-      "note": "DB-enforced FK (conditional — only added if pregnancy_id column exists in raw_anc_records). ON DELETE CASCADE. pregnancy_id column may be absent depending on source API response."
+      "note": "Each raw ANC visit record belongs to a mother journey. pregnancy_id may not be present in all records — use mother_id as the fallback join."
     },
     {
       "child": {
@@ -46,7 +46,7 @@
         "column": "pregnancy_id"
       },
       "enforced": true,
-      "note": "DB-enforced FK (conditional — only added if pregnancy_id column exists in raw_child_records). ON DELETE CASCADE. pregnancy_id column may be absent depending on source API response."
+      "note": "Each raw child record belongs to a mother journey. pregnancy_id may not be present in all records — use mother_id as the fallback join."
     },
     {
       "child": {
@@ -62,7 +62,7 @@
         "column": "mother_id"
       },
       "enforced": false,
-      "note": "Logical join only — NOT a DB FK. mother_journeys has one row per pregnancy so mother_id is non-unique (a mother with 2 pregnancies has 2 rows). Join: anc_visits.mother_id = mother_journeys.mother_id returns all ANC visits for all pregnancies of that mother."
+      "note": "A mother can have multiple pregnancies, so mother_id is not unique in mother_journeys. This join returns ANC visits across all pregnancies of a mother. To focus on a specific pregnancy, filter by pregnancy_id or registration date."
     },
     {
       "child": {
@@ -78,7 +78,7 @@
         "column": "mother_id"
       },
       "enforced": false,
-      "note": "Logical join via mother_id. pregnancy_id column may be absent from raw_anc_records (not present in source API response)."
+      "note": "Join raw ANC records to the mother journey via mother_id when pregnancy_id is not available."
     },
     {
       "child": {
@@ -94,39 +94,7 @@
         "column": "mother_id"
       },
       "enforced": false,
-      "note": "Logical join via mother_id. pregnancy_id column may be absent from raw_child_records (not present in source API response)."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_blocks",
-        "column": "district_code_lgd"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_districts",
-        "column": "district_code_lgd"
-      },
-      "enforced": false,
-      "note": "Geographic hierarchy: blocks belong to districts. Use LGD codes to join health data to geographic boundaries."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_villages",
-        "column": "block_code_lgd"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_blocks",
-        "column": "block_code_lgd"
-      },
-      "enforced": false,
-      "note": "Geographic hierarchy: villages belong to blocks."
+      "note": "Join raw child records to the mother journey via mother_id when pregnancy_id is not available."
     },
     {
       "child": {
@@ -142,7 +110,279 @@
         "column": "block_code_lgd"
       },
       "enforced": false,
-      "note": "Join monthly health indicators to geographic hierarchy via LGD block code."
+      "note": "Join monthly village health indicators to the block reference for geographic hierarchy and block name."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "districts",
+        "column": "lgd_statecode"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "states",
+        "column": "lgd_statecode"
+      },
+      "enforced": true,
+      "note": "Geographic hierarchy: each district belongs to the Meghalaya state."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "subdistricts",
+        "column": "lgd_districtcode"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "districts",
+        "column": "lgd_districtcode"
+      },
+      "enforced": true,
+      "note": "Geographic hierarchy: each sub-district (block) belongs to a district."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "villages_poly",
+        "column": "lgd_subdistrictcode"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "subdistricts",
+        "column": "lgd_subdistrictcode"
+      },
+      "enforced": true,
+      "note": "Geographic hierarchy: each village boundary polygon belongs to a sub-district (block)."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "villages_poly",
+        "column": "lgd_districtcode"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "districts",
+        "column": "lgd_districtcode"
+      },
+      "enforced": true,
+      "note": "Geographic hierarchy: each village boundary polygon belongs to a district."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "villages_point",
+        "column": "lgd_subdistrictcode"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "subdistricts",
+        "column": "lgd_subdistrictcode"
+      },
+      "enforced": true,
+      "note": "Geographic hierarchy: each village GPS point belongs to a sub-district (block)."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "villages_point",
+        "column": "lgd_districtcode"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "districts",
+        "column": "lgd_districtcode"
+      },
+      "enforced": true,
+      "note": "Geographic hierarchy: each village GPS point belongs to a district."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_blocks",
+        "column": "district_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_districts",
+        "column": "district_code_lgd"
+      },
+      "enforced": true,
+      "note": "Each block belongs to a district. Use to roll up block-level health data to district level."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_villages",
+        "column": "block_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_blocks",
+        "column": "block_code_lgd"
+      },
+      "enforced": true,
+      "note": "Each village belongs to a block."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_villages",
+        "column": "district_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_districts",
+        "column": "district_code_lgd"
+      },
+      "enforced": true,
+      "note": "Each village belongs to a district. Allows district-level aggregation of village data without joining through blocks."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_health_facilities",
+        "column": "block_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_blocks",
+        "column": "block_code_lgd"
+      },
+      "enforced": true,
+      "note": "Each health facility is located within a block."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_health_facilities",
+        "column": "district_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_districts",
+        "column": "district_code_lgd"
+      },
+      "enforced": true,
+      "note": "Each health facility is located within a district."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_districts",
+        "column": "district_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "districts",
+        "column": "lgd_districtcode"
+      },
+      "enforced": true,
+      "note": "Links the canonical district reference to the corresponding district boundary. Use when you need health or master data alongside the geographic boundary for spatial analysis."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_blocks",
+        "column": "district_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "districts",
+        "column": "lgd_districtcode"
+      },
+      "enforced": true,
+      "note": "Links each block to its parent district boundary for spatial analysis."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_villages",
+        "column": "district_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "districts",
+        "column": "lgd_districtcode"
+      },
+      "enforced": true,
+      "note": "Links each village to its parent district boundary for spatial analysis."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_health_facilities",
+        "column": "district_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "districts",
+        "column": "lgd_districtcode"
+      },
+      "enforced": true,
+      "note": "Links each health facility to its parent district boundary for spatial analysis."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "geo_full_mapping",
+        "column": "district_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "districts",
+        "column": "lgd_districtcode"
+      },
+      "enforced": true,
+      "note": "Links the geographic hierarchy mapping to the district boundary. Some rows have no district code."
+    },
+    {
+      "child": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "master_villages",
+        "column": "village_code_lgd"
+      },
+      "parent": {
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "villages_point",
+        "column": "lgd_villagecode"
+      },
+      "enforced": false,
+      "note": "Matched villages get their geographic location from the village GPS points table. Villages without a matched LGD code use the block centroid as a location fallback."
     }
   ]
 }
