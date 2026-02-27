@@ -1,9 +1,0 @@
-{
-  "datasets": [
-    {
-      "type": "alloydb",
-      "name": "flights_dataset",
-      "description": "This database runs the airline's booking engine and flight management system. It needs to be fast, reliable, and consistent for tasks like selling a ticket, assigning a seat, or updating a flight's status.  The schema is normalized to ensure data integrity and avoid redundancy.  It only includes data from the year 2025."
-    }
-  ]
-}

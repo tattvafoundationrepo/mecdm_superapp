@@ -2,86 +2,58 @@
   "foreign_keys": [
     {
       "child": {
-        "type": "bigquery",
-        "dataset": "cymbal_flights_dataset",
-        "table": "flight_history",
-        "column": "flight_id"
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "raw_anc_records",
+        "column": "pregnancy_id"
       },
       "parent": {
         "type": "alloydb",
-        "dataset": "flights_dataset",
-        "table": "flights",
-        "column": "flight_id"
+        "dataset": "mecdm_superapp_db",
+        "table": "mother_journeys",
+        "column": "pregnancy_id"
       }
     },
     {
       "child": {
-        "type": "bigquery",
-        "dataset": "cymbal_flights_dataset",
-        "table": "flight_history",
-        "column": "departure_airport_iata"
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "raw_child_records",
+        "column": "pregnancy_id"
       },
       "parent": {
         "type": "alloydb",
-        "dataset": "flights_dataset",
-        "table": "airports",
-        "column": "iata"
+        "dataset": "mecdm_superapp_db",
+        "table": "mother_journeys",
+        "column": "pregnancy_id"
       }
     },
     {
       "child": {
-        "type": "bigquery",
-        "dataset": "cymbal_flights_dataset",
-        "table": "flight_history",
-        "column": "arrival_airport_iata"
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "raw_pregnancy_records",
+        "column": "pregnancy_id"
       },
       "parent": {
         "type": "alloydb",
-        "dataset": "flights_dataset",
-        "table": "airports",
-        "column": "iata"
+        "dataset": "mecdm_superapp_db",
+        "table": "mother_journeys",
+        "column": "pregnancy_id"
       }
     },
     {
       "child": {
-        "type": "bigquery",
-        "dataset": "cymbal_flights_dataset",
-        "table": "ticket_sales_history",
-        "column": "flight_id"
+        "type": "alloydb",
+        "dataset": "mecdm_superapp_db",
+        "table": "anc_visits",
+        "column": "mother_id"
       },
       "parent": {
         "type": "alloydb",
-        "dataset": "flights_dataset",
-        "table": "flights",
-        "column": "flight_id"
-      }
-    },
-    {
-      "child": {
-        "type": "bigquery",
-        "dataset": "cymbal_flights_dataset",
-        "table": "ticket_sales_history",
-        "column": "customer_id"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "flights_dataset",
-        "table": "customers",
-        "column": "customer_id"
-      }
-    },
-    {
-      "child": {
-        "type": "bigquery",
-        "dataset": "cymbal_flights_dataset",
-        "table": "ticket_sales_history",
-        "column": "ticket_id"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "flights_dataset",
-        "table": "tickets",
-        "column": "ticket_id"
+        "dataset": "mecdm_superapp_db",
+        "table": "mother_journeys",
+        "column": "mother_id"
       }
     }
   ]

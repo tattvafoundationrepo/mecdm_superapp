@@ -19,7 +19,7 @@ tools:
     list_tables:
         kind: postgres-sql
         source: alloydb-pg-source
-        description: "Lists detailed schema information (object type, columns, constraints, indexes, triggers, owner, comment) as JSON for user-created tables (ordinary or partitioned). Filters by a comma-separated list of names. If names are omitted, lists all tables in user schemas."
+        description: "Lists detailed schema information (object type, columns, constraints, indexes, triggers, owner, comment) as JSON for user-created tables (ordinary or partitioned). Filters by a comma-separated list of names. If names are omitted, lists all tables in user schemas. MECDM DB uses PostGIS (GIST indexes on geom) and JSONB columns. Geography: districts -> blocks -> villages -> facilities. Tracking: mother_journeys -> anc_visits/raw records."
         statement: |
             WITH desired_relkinds AS (
                 SELECT ARRAY['r', 'p']::char[] AS kinds -- Always consider both 'TABLE' and 'PARTITIONED TABLE'

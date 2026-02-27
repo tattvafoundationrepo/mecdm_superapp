@@ -1,0 +1,69 @@
+{
+  "datasets": [
+    {
+      "type": "alloydb",
+      "name": "mecdm_superapp_db",
+      "description": "PostgreSQL AlloyDB dataset containing Meghalaya Early Childhood Development Mission (MECDM) geographic boundaries, health facilities, maternal and child tracking records, and demographic indicators."
+    }
+  ],
+  "cross_dataset_relations": {
+    "foreign_keys": [
+      {
+        "child": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "raw_anc_records",
+          "column": "pregnancy_id"
+        },
+        "parent": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "mother_journeys",
+          "column": "pregnancy_id"
+        }
+      },
+      {
+        "child": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "raw_child_records",
+          "column": "pregnancy_id"
+        },
+        "parent": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "mother_journeys",
+          "column": "pregnancy_id"
+        }
+      },
+      {
+        "child": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "raw_pregnancy_records",
+          "column": "pregnancy_id"
+        },
+        "parent": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "mother_journeys",
+          "column": "pregnancy_id"
+        }
+      },
+      {
+        "child": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "anc_visits",
+          "column": "mother_id"
+        },
+        "parent": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "mother_journeys",
+          "column": "mother_id"
+        }
+      }
+    ]
+  }
+}
