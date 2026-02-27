@@ -28,6 +28,8 @@ dependencies = [
     "geopandas>=1.0.0",
     "geoalchemy2>=0.15.0",
     "sqlalchemy>=2.0.0",
+    "google-cloud-discoveryengine>=0.11.0",
+    "requests>=2.31.0",
 ]
 
 [dependency-groups]

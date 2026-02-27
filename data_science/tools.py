@@ -99,3 +99,203 @@ async def call_analytics_agent(
     )
     tool_context.state["analytics_agent_output"] = analytics_agent_output
     return analytics_agent_output
+
+
+async def get_current_datetime(tool_context: ToolContext) -> str:
+    """Returns the current date and time. Use this to grounding relative time queries like 'today' or 'last month'."""
+    from datetime import datetime
+    return f"The current date and time is: {datetime.now().isoformat()}"
+
+
+async def get_weather_data(location: str, tool_context: ToolContext) -> str:
+    """Fetches the current weather for a given location using the free Open-Meteo API.
+
+    Args:
+        location: The name of the city or location (e.g., 'Shillong').
+
+    Returns:
+        A string describing the current weather conditions.
+    """
+    import requests
+
+    # Simple geocoding using Open-Meteo's geocoding API
+    geocode_url = f"https://geocoding-api.open-meteo.com/v1/search?name={location}&count=1&language=en&format=json"
+    try:
+        geo_response = requests.get(geocode_url)
+        geo_response.raise_for_status()
+        geo_data = geo_response.json()
+
+        if not geo_data.get("results"):
+            return f"Could not find coordinates for location: {location}"
+
+        lat = geo_data["results"][0]["latitude"]
+        lon = geo_data["results"][0]["longitude"]
+
+        # Fetch weather data
+        weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,precipitation,weather_code&timezone=auto"
+        weather_response = requests.get(weather_url)
+        weather_response.raise_for_status()
+        weather_data = weather_response.json()
+
+        current = weather_data.get("current", {})
+        temp = current.get("temperature_2m", "N/A")
+        humidity = current.get("relative_humidity_2m", "N/A")
+        precip = current.get("precipitation", "N/A")
+
+        return f"Current weather in {location}: Temperature {temp}°C, Humidity {humidity}%, Precipitation {precip}mm."
+    except Exception as e:
+        logger.error(f"Error fetching weather data: {e}")
+        return f"Error fetching weather data: {e}"
+
+
+async def get_historical_weather_data(location: str, start_date: str, end_date: str, tool_context: ToolContext) -> str:
+    """Fetches historical weather data using the Open-Meteo Archive API.
+
+    Args:
+        location: The name of the city or location (e.g., 'Shillong').
+        start_date: Start date in YYYY-MM-DD format (e.g., '2023-11-01').
+        end_date: End date in YYYY-MM-DD format (e.g., '2023-11-30').
+
+    Returns:
+        A string summarizing the historical weather data for that period.
+    """
+    import requests
+
+    geocode_url = f"https://geocoding-api.open-meteo.com/v1/search?name={location}&count=1&language=en&format=json"
+    try:
+        geo_response = requests.get(geocode_url)
+        geo_response.raise_for_status()
+        geo_data = geo_response.json()
+
+        if not geo_data.get("results"):
+            return f"Could not find coordinates for location: {location}"
+
+        lat = geo_data["results"][0]["latitude"]
+        lon = geo_data["results"][0]["longitude"]
+
+        # Open-Meteo Archive API URL
+        archive_url = f"https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitude={lon}&start_date={start_date}&end_date={end_date}&daily=temperature_2m_max,temperature_2m_min,precipitation_sum&timezone=auto"
+        weather_response = requests.get(archive_url)
+        weather_response.raise_for_status()
+        weather_data = weather_response.json()
+
+        daily = weather_data.get("daily", {})
+        if not daily:
+            return f"No historical data available for {location} between {start_date} and {end_date}."
+
+        max_temps = daily.get("temperature_2m_max", [])
+        min_temps = daily.get("temperature_2m_min", [])
+        precips = daily.get("precipitation_sum", [])
+
+        # Calculate some basic aggregates to summarize
+        valid_max = [t for t in max_temps if t is not None]
+        valid_min = [t for t in min_temps if t is not None]
+        valid_precip = [p for p in precips if p is not None]
+
+        avg_max = round(sum(valid_max) / len(valid_max),
+                        2) if valid_max else "N/A"
+        avg_min = round(sum(valid_min) / len(valid_min),
+                        2) if valid_min else "N/A"
+        total_precip = round(sum(valid_precip), 2) if valid_precip else "N/A"
+
+        return f"Historical weather for {location} from {start_date} to {end_date}:\\nAverage Max Temp: {avg_max}°C\\nAverage Min Temp: {avg_min}°C\\nTotal Precipitation: {total_precip}mm."
+
+    except Exception as e:
+        logger.error(f"Error fetching historical weather data: {e}")
+        return f"Error fetching historical weather data: {e}"
+
+
+async def export_data_to_csv(data_json: str, filename: str, tool_context: ToolContext) -> str:
+    """Exports a JSON string representing a list of records to a CSV file.
+
+    Args:
+        data_json: A JSON-formatted string, specifically a list of dictionaries (records).
+        filename: The desired name of the output CSV file (e.g., 'report.csv').
+
+    Returns:
+        A success message with the file path, or an error message.
+    """
+    import csv
+    import json
+    import os
+
+    try:
+        data = json.loads(data_json)
+        if not data or not isinstance(data, list):
+            return "Error: Data must be a JSON array of objects."
+
+        # Write to static folder to make it accessible if needed
+        output_dir = "static/exports"
+        os.makedirs(output_dir, exist_ok=True)
+        filepath = os.path.join(output_dir, filename)
+
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            if len(data) > 0:
+                keys = data[0].keys()
+                dict_writer = csv.DictWriter(f, keys)
+                dict_writer.writeheader()
+                dict_writer.writerows(data)
+
+        return f"Successfully exported data to {filepath}"
+    except Exception as e:
+        logger.error(f"Error exporting data to CSV: {e}")
+        return f"Error exporting data: {e}"
+
+
+async def search_policy_rag_engine(query: str, tool_context: ToolContext) -> str:
+    """Searches the Meghalaya Government Policy Intelligence Engine (Vertex AI Search) for policy details.
+
+    Args:
+        query: The user's question or search terms regarding policy guidelines.
+
+    Returns:
+        The search results or summarized response from the RAG engine.
+    """
+    import os
+    from google.api_core.client_options import ClientOptions
+    from google.cloud import discoveryengine_v1 as discoveryengine
+
+    project_id = os.getenv("MECDM_POLICY_PROJECT_ID")
+    location = os.getenv("MECDM_POLICY_LOCATION", "global")
+    data_store_id = os.getenv("MECDM_POLICY_DATA_STORE_ID")
+
+    if not all([project_id, data_store_id]):
+        return "Error: RAG Engine configuration (MECDM_POLICY_PROJECT_ID, MECDM_POLICY_DATA_STORE_ID) is missing in the environment."
+
+    try:
+        # Must configure client options with regional endpoint if location is not global
+        client_options = (
+            ClientOptions(
+                api_endpoint=f"{location}-discoveryengine.googleapis.com")
+            if location != "global"
+            else None
+        )
+
+        client = discoveryengine.SearchServiceClient(
+            client_options=client_options)
+
+        serving_config = f"projects/{project_id}/locations/{location}/collections/default_collection/dataStores/{data_store_id}/servingConfigs/default_config"
+
+        request = discoveryengine.SearchRequest(
+            serving_config=serving_config,
+            query=query,
+            page_size=3,
+        )
+
+        response = client.search(request)
+
+        results = []
+        for result in response.results:
+            results.append(str(result.document.derived_struct_data.get("extractive_answers", {}).get(
+                "content", result.document.derived_struct_data.get("snippets", "No snippet"))))
+
+        if not results:
+            return "No relevant policy documents found for the query."
+
+        # Combine the top snippets
+        combined_results = "\\n---\\n".join(results)
+        return f"Search Results from Policy Engine:\\n{combined_results}"
+
+    except Exception as e:
+        logger.error(f"Error querying RAG engine: {e}")
+        return f"Error querying policy engine: {e}"

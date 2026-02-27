@@ -27,13 +27,22 @@ from datetime import date
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.apps import App
+from google.adk.tools import google_search
 # from google.adk.tools import load_artifacts
 from google.genai import types
 
 from .prompts import return_instructions_root
 from .sub_agents.alloydb.tools import \
     get_database_settings as get_alloydb_database_settings
-from .tools import call_alloydb_agent, call_analytics_agent
+from .tools import (
+    call_alloydb_agent,
+    call_analytics_agent,
+    export_data_to_csv,
+    get_current_datetime,
+    get_historical_weather_data,
+    get_weather_data,
+    search_policy_rag_engine,
+)
 
 # Set up logging
 # Note this level can be overridden by adk web on the command line;
@@ -134,7 +143,15 @@ def load_database_settings_in_context(callback_context: CallbackContext):
 
 
 def get_root_agent() -> LlmAgent:
-    tools = [call_analytics_agent]
+    tools = [
+        call_analytics_agent,
+        get_current_datetime,
+        get_weather_data,
+        get_historical_weather_data,
+        export_data_to_csv,
+        search_policy_rag_engine,
+        google_search,
+    ]
     sub_agents = []
     for dataset in _dataset_config["datasets"]:
         if dataset["type"] == "alloydb":
