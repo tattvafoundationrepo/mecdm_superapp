@@ -243,7 +243,7 @@ async def export_data_to_csv(data_json: str, filename: str, tool_context: ToolCo
 
 
 async def search_policy_rag_engine(query: str, tool_context: ToolContext) -> str:
-    """Searches the Meghalaya Government Policy Intelligence Engine (Vertex AI Search) for policy details.
+    """Searches the Meghalaya Government Policy Intelligence Engine (Vertex AI RAG API) for policy details.
 
     Args:
         query: The user's question or search terms regarding policy guidelines.
@@ -252,49 +252,58 @@ async def search_policy_rag_engine(query: str, tool_context: ToolContext) -> str
         The search results or summarized response from the RAG engine.
     """
     import os
-    from google.api_core.client_options import ClientOptions
-    from google.cloud import discoveryengine_v1 as discoveryengine
+    import vertexai
+    from vertexai.preview import rag
 
     project_id = os.getenv("MECDM_POLICY_PROJECT_ID")
-    location = os.getenv("MECDM_POLICY_LOCATION", "global")
-    data_store_id = os.getenv("MECDM_POLICY_DATA_STORE_ID")
+    # rag has specific regional availability
+    # Based on user's region
+    location = os.getenv("MECDM_POLICY_LOCATION", "asia-south1")
+    corpus_id = os.getenv("MECDM_POLICY_CORPUS_ID")
 
-    if not all([project_id, data_store_id]):
-        return "Error: RAG Engine configuration (MECDM_POLICY_PROJECT_ID, MECDM_POLICY_DATA_STORE_ID) is missing in the environment."
+    if not all([project_id, corpus_id]):
+        return "Error: RAG Engine configuration (MECDM_POLICY_PROJECT_ID, MECDM_POLICY_CORPUS_ID) is missing in the environment."
 
     try:
-        # Must configure client options with regional endpoint if location is not global
-        client_options = (
-            ClientOptions(
-                api_endpoint=f"{location}-discoveryengine.googleapis.com")
-            if location != "global"
-            else None
+        # Initialize Vertex AI
+        vertexai.init(project=project_id, location=location)
+
+        # Configure the RAG Retrieval
+        corpus_name = f"projects/{project_id}/locations/{location}/ragCorpora/{corpus_id}"
+
+        response = rag.retrieval_query(
+            rag_resources=[
+                rag.RagResource(
+                    rag_corpus=corpus_name,
+                )
+            ],
+            text=query,
+            similarity_top_k=3,  # Optional
+            vector_distance_threshold=0.5,  # Optional
         )
-
-        client = discoveryengine.SearchServiceClient(
-            client_options=client_options)
-
-        serving_config = f"projects/{project_id}/locations/{location}/collections/default_collection/dataStores/{data_store_id}/servingConfigs/default_config"
-
-        request = discoveryengine.SearchRequest(
-            serving_config=serving_config,
-            query=query,
-            page_size=3,
-        )
-
-        response = client.search(request)
 
         results = []
-        for result in response.results:
-            results.append(str(result.document.derived_struct_data.get("extractive_answers", {}).get(
-                "content", result.document.derived_struct_data.get("snippets", "No snippet"))))
+        if hasattr(response, 'contexts') and hasattr(response.contexts, 'contexts'):
+            for context in response.contexts.contexts:
+                # context.text contains the snippet
+                snippet = context.text if hasattr(
+                    context, 'text') else str(context)
+
+                # Try to extract the source filename if available
+                source = "Unknown Source"
+                if hasattr(context, 'source_uri'):
+                    source = context.source_uri
+                elif hasattr(context, 'source_display_name'):
+                    source = context.source_display_name
+
+                results.append(f"[{source}]\\n{snippet}")
 
         if not results:
             return "No relevant policy documents found for the query."
 
         # Combine the top snippets
-        combined_results = "\\n---\\n".join(results)
-        return f"Search Results from Policy Engine:\\n{combined_results}"
+        combined_results = "\\n\\n---\\n\\n".join(results)
+        return f"Search Results from Policy Engine:\\n\\n{combined_results}"
 
     except Exception as e:
         logger.error(f"Error querying RAG engine: {e}")
