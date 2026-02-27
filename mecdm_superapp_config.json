@@ -199,7 +199,39 @@
           "column": "pregnancy_id"
         },
         "enforced": true,
-        "note": "DB-enforced FK. pregnancy_id is the PK of mother_journeys."
+        "note": "DB-enforced FK. pregnancy_id has a UNIQUE constraint (NULLs allowed) in mother_journeys; the actual PK is row_id (SERIAL). References mother_journeys(pregnancy_id) ON DELETE CASCADE."
+      },
+      {
+        "child": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "raw_anc_records",
+          "column": "pregnancy_id"
+        },
+        "parent": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "mother_journeys",
+          "column": "pregnancy_id"
+        },
+        "enforced": true,
+        "note": "DB-enforced FK (conditional — only added if pregnancy_id column exists in raw_anc_records). ON DELETE CASCADE. pregnancy_id column may be absent depending on source API response."
+      },
+      {
+        "child": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "raw_child_records",
+          "column": "pregnancy_id"
+        },
+        "parent": {
+          "type": "alloydb",
+          "dataset": "mecdm_superapp_db",
+          "table": "mother_journeys",
+          "column": "pregnancy_id"
+        },
+        "enforced": true,
+        "note": "DB-enforced FK (conditional — only added if pregnancy_id column exists in raw_child_records). ON DELETE CASCADE. pregnancy_id column may be absent depending on source API response."
       },
       {
         "child": {
