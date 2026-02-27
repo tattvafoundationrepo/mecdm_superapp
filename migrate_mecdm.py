@@ -27,6 +27,10 @@ Usage:
     python migrate_mecdm.py --only raw_json        # raw JSON tables only
     python migrate_mecdm.py --only ref_json        # reference JSON tables only
     python migrate_mecdm.py --only schema          # PKs/FKs/indexes/comments only
+    python migrate_mecdm.py --drop                 # drop all 25 tables then run full migration
+    python migrate_mecdm.py --drop --only health   # drop only health-stage tables, then reload
+    python migrate_mecdm.py --truncate             # truncate all tables (keep schema) then reload
+    python migrate_mecdm.py --truncate --only geo  # truncate only geographic tables
 
 Environment variables (see .env):
     ALLOYDB_POSTGRES_USER, ALLOYDB_POSTGRES_PASSWORD,
@@ -78,6 +82,40 @@ MASTER_DIR = OUTPUT_DIR / "master"
 # ---------------------------------------------------------------------------
 CHUNKSIZE = 5_000   # rows per pandas read_csv chunk
 BATCH_SIZE = 5_000  # rows per COPY batch (for JSON → relational)
+
+# ---------------------------------------------------------------------------
+# Table registry — used by --drop and --truncate
+# Child tables are listed before parent tables so DROP without CASCADE is safe,
+# though we always use CASCADE anyway for convenience.
+# ---------------------------------------------------------------------------
+STAGE_TABLES: dict[str, list[str]] = {
+    "geo": [
+        "villages_point", "villages_poly",
+        "blocks", "subdistricts",
+        "district_boundaries", "districts", "states",
+    ],
+    "master": [
+        "geo_match_report", "geo_full_mapping",
+        "master_villages", "master_health_facilities",
+        "master_blocks", "master_districts",
+        "meghealth_geo_mapping",
+    ],
+    "infra": [
+        "anganwadi_centres", "health_facilities",
+    ],
+    "health": [
+        "anc_visits", "mother_journeys",
+        "village_indicators_monthly",
+    ],
+    "raw_json": [
+        "raw_anc_records", "raw_child_records", "raw_pregnancy_records",
+    ],
+    "ref_json": [
+        "nfhs_indicators", "video_library", "research_articles",
+    ],
+}
+# Flat ordered list — children before parents for safe sequential DROP
+ALL_TABLES: list[str] = [t for tables in STAGE_TABLES.values() for t in tables]
 
 
 # ===========================================================================
@@ -146,6 +184,48 @@ def _exec_sql(engine, statements: list[str], label: str):
                 conn.execute(text(sql))
             except Exception as exc:
                 logger.warning(f"[{label}] skipped: {exc!s:.120}")
+
+
+def drop_tables(engine, tables: list[str]):
+    """
+    DROP TABLE IF EXISTS … CASCADE for each table.
+
+    Uses CASCADE so that foreign-key dependencies are handled automatically.
+    Tables that don't exist are silently skipped. Schema objects (indexes,
+    sequences, comments) attached to the tables are removed along with them.
+    """
+    logger.info(f"Dropping {len(tables)} table(s)…")
+    with engine.begin() as conn:
+        for tbl in tables:
+            try:
+                conn.execute(text(f"DROP TABLE IF EXISTS {tbl} CASCADE;"))
+                logger.info(f"  dropped {tbl}")
+            except Exception as exc:
+                logger.warning(f"  could not drop {tbl}: {exc!s:.120}")
+
+
+def truncate_tables(engine, tables: list[str]):
+    """
+    TRUNCATE all tables that currently exist, in a single statement with CASCADE.
+
+    Unlike DROP, TRUNCATE keeps the schema intact (columns, indexes, PKs, FKs,
+    comments). Useful for reloading data without rebuilding the full schema.
+    RESTART IDENTITY resets all sequences to their start values.
+    """
+    existing = [t for t in tables if table_exists(engine, t)]
+    if not existing:
+        logger.info("  No tables to truncate (none exist yet).")
+        return
+    tbl_list = ", ".join(existing)
+    logger.info(f"Truncating {len(existing)} table(s): {tbl_list}…")
+    with engine.begin() as conn:
+        try:
+            conn.execute(text(
+                f"TRUNCATE TABLE {tbl_list} RESTART IDENTITY CASCADE;"
+            ))
+            logger.info("  Truncate complete.")
+        except Exception as exc:
+            logger.warning(f"  Truncate failed: {exc!s:.160}")
 
 
 # ===========================================================================
@@ -759,12 +839,27 @@ def run_migration(args):
     only = getattr(args, "only", None)
     skip_raw_json = getattr(args, "skip_raw_json", False)
     skip_if_exists = getattr(args, "skip_if_exists", False)
+    do_drop = getattr(args, "drop", False)
+    do_truncate = getattr(args, "truncate", False)
 
     def stage(name: str) -> bool:
         return only is None or only == name
 
+    # Resolve which tables are in scope for drop/truncate
+    target_tables = STAGE_TABLES.get(only, ALL_TABLES) if only else ALL_TABLES
+
     engine = get_engine()
     create_extensions(engine)
+
+    # ------------------------------------------------------------------
+    # Pre-load: drop or truncate (mutually exclusive; --drop takes priority)
+    # ------------------------------------------------------------------
+    if do_drop:
+        logger.info("=== Pre-load: DROP tables ===")
+        drop_tables(engine, target_tables)
+    elif do_truncate:
+        logger.info("=== Pre-load: TRUNCATE tables ===")
+        truncate_tables(engine, target_tables)
 
     # ------------------------------------------------------------------
     # 1. Geographic tables (GeoJSON → PostGIS)
@@ -919,6 +1014,26 @@ def _parse_args():
         "--skip-if-exists",
         action="store_true",
         help="For large tables: skip loading if the table already has rows.",
+    )
+
+    drop_group = parser.add_mutually_exclusive_group()
+    drop_group.add_argument(
+        "--drop",
+        action="store_true",
+        help=(
+            "DROP TABLE IF EXISTS CASCADE for all in-scope tables before loading. "
+            "Removes data, schema, indexes, and constraints. "
+            "Combine with --only to limit scope."
+        ),
+    )
+    drop_group.add_argument(
+        "--truncate",
+        action="store_true",
+        help=(
+            "TRUNCATE all in-scope tables before loading (keeps schema, indexes, "
+            "PKs and FKs intact). Resets sequences. "
+            "Combine with --only to limit scope."
+        ),
     )
     return parser.parse_args()
 
