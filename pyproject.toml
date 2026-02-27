@@ -24,6 +24,10 @@ dependencies = [
     "numpy>=2.3.1",
     "toolbox-core>=0.3.0",
     "pg8000>=1.31.2",
+    "psycopg2-binary>=2.9.0",
+    "geopandas>=1.0.0",
+    "geoalchemy2>=0.15.0",
+    "sqlalchemy>=2.0.0",
 ]
 
 [dependency-groups]

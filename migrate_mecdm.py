@@ -1,295 +1,928 @@
-import os
+#!/usr/bin/env python3
+"""
+MECDM SuperApp — AlloyDB/PostgreSQL Migration Script
+Meghalaya Early Childhood Development Mission
+
+Migrates all geographic, master-reference, health, and raw-data tables
+from the local mecdm_dataset folder into AlloyDB (PostGIS-enabled Postgres).
+
+Tables created (25 total):
+  Geographic  : states, districts, district_boundaries, subdistricts, blocks,
+                villages_poly, villages_point
+  Master ref  : master_districts, master_blocks, master_villages,
+                master_health_facilities, geo_full_mapping, geo_match_report
+  Infrastructure: health_facilities, anganwadi_centres
+  Geography   : meghealth_geo_mapping
+  Health data : mother_journeys, anc_visits, village_indicators_monthly
+  Raw records : raw_anc_records, raw_child_records, raw_pregnancy_records
+  Reference   : nfhs_indicators, video_library, research_articles
+
+Usage:
+    python migrate_mecdm.py                        # full migration
+    python migrate_mecdm.py --skip-raw-json        # skip large raw JSON files (~961 MB)
+    python migrate_mecdm.py --only geo             # geographic tables only
+    python migrate_mecdm.py --only master          # master/reference tables only
+    python migrate_mecdm.py --only infra           # infrastructure tables only
+    python migrate_mecdm.py --only health          # health CSV tables only
+    python migrate_mecdm.py --only raw_json        # raw JSON tables only
+    python migrate_mecdm.py --only ref_json        # reference JSON tables only
+    python migrate_mecdm.py --only schema          # PKs/FKs/indexes/comments only
+
+Environment variables (see .env):
+    ALLOYDB_POSTGRES_USER, ALLOYDB_POSTGRES_PASSWORD,
+    ALLOYDB_POSTGRES_HOST, ALLOYDB_POSTGRES_PORT,
+    ALLOYDB_POSTGRES_DATABASE
+    ALLOYDB_SSLMODE  (default: require — set to 'disable' for local dev without proxy)
+"""
+
+import argparse
+import io
 import json
 import logging
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
 import pandas as pd
 import geopandas as gpd
-from sqlalchemy import create_engine, text
-from geoalchemy2 import Geometry
+import psycopg2
+import psycopg2.extras
 from dotenv import load_dotenv
+from geoalchemy2 import Geometry
+from sqlalchemy import create_engine, inspect, text
 
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# Load local environment variables if available
+# ---------------------------------------------------------------------------
+# Bootstrap
+# ---------------------------------------------------------------------------
 load_dotenv()
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger(__name__)
 
-def get_engine():
-    """Create SQLAlchemy engine from environment variables."""
-    # Note: For AlloyDB via Auth Proxy, standard PG environment variables can be used
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+_HERE = Path(__file__).parent
+BASE_DIR = _HERE / "mecdm_dataset" / "db_20260226"
+GEO_DIR = BASE_DIR / "Meghalaya Master Data"
+OUTPUT_DIR = BASE_DIR / "output"
+MASTER_DIR = OUTPUT_DIR / "master"
+
+# ---------------------------------------------------------------------------
+# Tuning
+# ---------------------------------------------------------------------------
+CHUNKSIZE = 5_000   # rows per pandas read_csv chunk
+BATCH_SIZE = 5_000  # rows per COPY batch (for JSON → relational)
+
+
+# ===========================================================================
+# Engine helpers
+# ===========================================================================
+
+def _dsn() -> str:
     user = os.environ.get("ALLOYDB_POSTGRES_USER", "postgres")
     password = os.environ.get("ALLOYDB_POSTGRES_PASSWORD", "postgres")
     host = os.environ.get("ALLOYDB_POSTGRES_HOST", "127.0.1.1")
     port = os.environ.get("ALLOYDB_POSTGRES_PORT", "5432")
     db = os.environ.get("ALLOYDB_POSTGRES_DATABASE", "postgres")
+    return f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
-    conn_str = f"postgresql://{user}:{password}@{host}:{port}/{db}"
-    # Standard SSL connection mapping for remote AlloyDB/Cloud SQL instances
+
+def get_engine():
+    """SQLAlchemy engine using psycopg2. SSL controlled by ALLOYDB_SSLMODE env var."""
+    sslmode = os.environ.get("ALLOYDB_SSLMODE", "require")
     return create_engine(
-        conn_str,
-        connect_args={'sslmode': 'require'}
+        _dsn(),
+        connect_args={"sslmode": sslmode},
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=2,
     )
 
 
+def get_psycopg2_conn():
+    """Raw psycopg2 connection for COPY operations."""
+    user = os.environ.get("ALLOYDB_POSTGRES_USER", "postgres")
+    password = os.environ.get("ALLOYDB_POSTGRES_PASSWORD", "postgres")
+    host = os.environ.get("ALLOYDB_POSTGRES_HOST", "127.0.1.1")
+    port = os.environ.get("ALLOYDB_POSTGRES_PORT", "5432")
+    db = os.environ.get("ALLOYDB_POSTGRES_DATABASE", "postgres")
+    sslmode = os.environ.get("ALLOYDB_SSLMODE", "require")
+    return psycopg2.connect(
+        host=host, port=port, dbname=db,
+        user=user, password=password, sslmode=sslmode,
+    )
+
+
+# ===========================================================================
+# Utility helpers
+# ===========================================================================
+
+def table_exists(engine, table_name: str) -> bool:
+    return table_name in inspect(engine).get_table_names(schema="public")
+
+
+def get_row_count(engine, table_name: str) -> int:
+    with engine.connect() as conn:
+        return conn.execute(text(f"SELECT COUNT(*) FROM {table_name}")).scalar()
+
+
 def create_extensions(engine):
-    """Enable necessary PostgreSQL extensions."""
-    logger.info("Ensuring PostGIS is installed...")
+    logger.info("Ensuring PostGIS extension is installed…")
     with engine.begin() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
 
 
-def load_geojson(engine, filepath, table_name):
-    """Load a GeoJSON file into a PostGIS table."""
-    logger.info(f"Loading {filepath} into {table_name}...")
+def _exec_sql(engine, statements: list[str], label: str):
+    """Execute a list of SQL statements, logging warnings on failure."""
+    with engine.begin() as conn:
+        for sql in statements:
+            try:
+                conn.execute(text(sql))
+            except Exception as exc:
+                logger.warning(f"[{label}] skipped: {exc!s:.120}")
+
+
+# ===========================================================================
+# Loaders
+# ===========================================================================
+
+def load_geojson(engine, filepath: str | Path, table_name: str, comment: str = ""):
+    """Load a GeoJSON file into a PostGIS table (geometry column: 'geometry')."""
+    filepath = Path(filepath)
+    if not filepath.exists():
+        logger.warning(f"File not found, skipping {table_name}: {filepath}")
+        return
+    logger.info(f"Loading {filepath.name} → {table_name}…")
     try:
         gdf = gpd.read_file(filepath)
-        # Ensure it's in WGS84
         if gdf.crs is None or gdf.crs.to_epsg() != 4326:
             gdf = gdf.to_crs(epsg=4326)
-
-        # Determine geometry type dynamically or default to Geometry
-        geom_type = 'GEOMETRY'
-
+        geom_type = gdf.geometry.geom_type.mode()[0].upper() if not gdf.empty else "GEOMETRY"
         gdf.to_postgis(
-            table_name,
-            engine,
-            if_exists='replace',
-            index=False,
-            dtype={'geometry': Geometry(geom_type, srid=4326)}
+            table_name, engine,
+            if_exists="replace", index=False,
+            dtype={"geometry": Geometry(geom_type, srid=4326)},
         )
-        logger.info(f"Successfully loaded {table_name}.")
-    except Exception as e:
-        logger.error(f"Failed to load {table_name}: {e}")
+        logger.info(f"  ✓ {table_name}: {len(gdf):,} features")
+    except Exception as exc:
+        logger.error(f"Failed {table_name}: {exc}")
+        raise
 
 
-def load_csv(engine, filepath, table_name, lat_col=None, lon_col=None):
-    """Load a CSV file, optionally creating a geometry column."""
-    logger.info(f"Loading {filepath} into {table_name}...")
+def load_csv_small(engine, filepath: str | Path, table_name: str, comment: str = ""):
+    """Load a small CSV file via pandas to_sql (replace)."""
+    filepath = Path(filepath)
+    if not filepath.exists():
+        logger.warning(f"File not found, skipping {table_name}: {filepath}")
+        return
+    logger.info(f"Loading {filepath.name} → {table_name}…")
     try:
-        df = pd.read_csv(filepath)
-        if lat_col and lon_col and lat_col in df.columns and lon_col in df.columns:
-            # Drop rows with invalid coordinates
-            valid_coords = df[df[lat_col].notnull() & df[lon_col].notnull()]
-            gdf = gpd.GeoDataFrame(
-                valid_coords,
-                geometry=gpd.points_from_xy(
-                    valid_coords[lon_col], valid_coords[lat_col]),
-                crs="EPSG:4326"
-            )
-            # Find rows without coordinates to append as standard table rows
-            invalid_coords = df[df[lat_col].isnull() | df[lon_col].isnull()]
-            if not invalid_coords.empty:
-                logger.warning(
-                    f"Found {len(invalid_coords)} rows without valid coordinates for {table_name}.")
-
-            gdf.rename_geometry('geom', inplace=True)
-            gdf.to_postgis(
-                table_name,
-                engine,
-                if_exists='replace',
-                index=False,
-                dtype={'geom': Geometry('POINT', srid=4326)}
-            )
-            # Append non-spatial rows
-            if not invalid_coords.empty:
-                invalid_coords.to_sql(table_name, engine,
-                                      if_exists='append', index=False)
-        else:
-            df.to_sql(table_name, engine, if_exists='replace', index=False)
-
-        logger.info(f"Successfully loaded {table_name}.")
-    except Exception as e:
-        logger.error(f"Failed to load {table_name}: {e}")
+        df = pd.read_csv(filepath, low_memory=False)
+        df.to_sql(table_name, engine, if_exists="replace", index=False)
+        logger.info(f"  ✓ {table_name}: {len(df):,} rows")
+    except Exception as exc:
+        logger.error(f"Failed {table_name}: {exc}")
+        raise
 
 
-def load_json_records(engine, filepath, table_name, fk_col=None, ref_table=None, ref_col=None, table_comment=None):
-    """Load raw JSON into a dedicated table with a JSONB column and foreign key."""
-    logger.info(f"Loading JSON data from {filepath} into {table_name}...")
+def load_csv_with_points(
+    engine,
+    filepath: str | Path,
+    table_name: str,
+    lat_col: str,
+    lon_col: str,
+    comment: str = "",
+):
+    """Load a CSV with lat/lon columns, creating a PostGIS POINT geometry column 'geom'."""
+    filepath = Path(filepath)
+    if not filepath.exists():
+        logger.warning(f"File not found, skipping {table_name}: {filepath}")
+        return
+    logger.info(f"Loading {filepath.name} → {table_name} (with POINT geometry)…")
     try:
-        with open(filepath, 'r') as f:
+        df = pd.read_csv(filepath, low_memory=False)
+        df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
+        df[lon_col] = pd.to_numeric(df[lon_col], errors="coerce")
+
+        valid = df[df[lat_col].notna() & df[lon_col].notna()].copy()
+        invalid = df[df[lat_col].isna() | df[lon_col].isna()].copy()
+
+        if valid.empty:
+            logger.warning(f"  No valid coordinates in {table_name}, loading without geometry")
+            df.to_sql(table_name, engine, if_exists="replace", index=False)
+            return
+
+        gdf = gpd.GeoDataFrame(
+            valid,
+            geometry=gpd.points_from_xy(valid[lon_col], valid[lat_col]),
+            crs="EPSG:4326",
+        )
+        gdf.rename_geometry("geom", inplace=True)
+        gdf.to_postgis(
+            table_name, engine,
+            if_exists="replace", index=False,
+            dtype={"geom": Geometry("POINT", srid=4326)},
+        )
+        if not invalid.empty:
+            logger.warning(f"  {len(invalid)} rows missing coordinates — appended without geometry")
+            invalid.to_sql(table_name, engine, if_exists="append", index=False)
+
+        logger.info(f"  ✓ {table_name}: {len(df):,} rows ({len(valid):,} with geometry)")
+    except Exception as exc:
+        logger.error(f"Failed {table_name}: {exc}")
+        raise
+
+
+def load_csv_large(
+    engine,
+    filepath: str | Path,
+    table_name: str,
+    comment: str = "",
+    skip_if_exists: bool = False,
+):
+    """
+    High-performance CSV loader using psycopg2 COPY FROM STDIN.
+
+    Strategy:
+      1. Read the first chunk to create an empty table via to_sql (establishes DDL).
+      2. Stream all chunks through psycopg2 copy_expert (~10× faster than INSERT).
+    """
+    filepath = Path(filepath)
+    if not filepath.exists():
+        logger.warning(f"File not found, skipping {table_name}: {filepath}")
+        return
+    if skip_if_exists and table_exists(engine, table_name):
+        count = get_row_count(engine, table_name)
+        if count > 0:
+            logger.info(f"Skipping {table_name} — already has {count:,} rows")
+            return
+
+    size_mb = filepath.stat().st_size / 1024 / 1024
+    logger.info(f"Loading {filepath.name} → {table_name} ({size_mb:.0f} MB, COPY protocol)…")
+
+    reader = pd.read_csv(
+        filepath,
+        chunksize=CHUNKSIZE,
+        low_memory=False,
+        dtype=str,
+        keep_default_na=True,
+        na_values=["", "NA", "N/A", "null", "NULL", "None"],
+    )
+
+    table_created = False
+    total_rows = 0
+    start_time = datetime.now()
+    raw_conn = get_psycopg2_conn()
+    cursor = raw_conn.cursor()
+
+    try:
+        for chunk_num, chunk in enumerate(reader):
+            if not table_created:
+                # Create empty table structure from first chunk
+                chunk.head(0).to_sql(table_name, engine, if_exists="replace", index=False)
+                table_created = True
+
+            buf = io.StringIO()
+            if chunk_num == 0:
+                chunk.to_csv(buf, index=False, na_rep="")
+                buf.seek(0)
+                cursor.copy_expert(
+                    f"COPY {table_name} FROM STDIN WITH (FORMAT CSV, HEADER, NULL '')",
+                    buf,
+                )
+            else:
+                chunk.to_csv(buf, index=False, header=False, na_rep="")
+                buf.seek(0)
+                cursor.copy_expert(
+                    f"COPY {table_name} FROM STDIN WITH (FORMAT CSV, NULL '')",
+                    buf,
+                )
+
+            total_rows += len(chunk)
+            if total_rows % 50_000 == 0:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                rate = total_rows / elapsed if elapsed > 0 else 0
+                logger.info(f"  … {total_rows:,} rows ({rate:,.0f} rows/s)")
+                raw_conn.commit()
+
+        raw_conn.commit()
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(f"  ✓ {table_name}: {total_rows:,} rows in {elapsed:.1f}s")
+    except Exception as exc:
+        raw_conn.rollback()
+        logger.error(f"Failed {table_name}: {exc}")
+        raise
+    finally:
+        cursor.close()
+        raw_conn.close()
+
+
+def load_json_flat(
+    engine,
+    filepath: str | Path,
+    table_name: str,
+    comment: str = "",
+    array_cols: list[str] | None = None,
+):
+    """
+    Load a small structured JSON file into a flat relational table.
+
+    List-valued columns are serialized to JSON strings for flexibility.
+    Nested dict columns are flattened via pd.json_normalize.
+    """
+    filepath = Path(filepath)
+    if not filepath.exists():
+        logger.warning(f"File not found, skipping {table_name}: {filepath}")
+        return
+    logger.info(f"Loading {filepath.name} → {table_name} (flat JSON)…")
+    try:
+        with open(filepath) as f:
             data = json.load(f)
 
-        # Standardize to list
         if isinstance(data, dict):
-            # Sometimes JSON dumps are dicts with internal lists, adapt based on exploration
             keys = list(data.keys())
             if len(keys) == 1 and isinstance(data[keys[0]], list):
                 data = data[keys[0]]
             else:
                 data = [data]
 
-        # Prepare DataFrame
-        records = []
-        for i, record in enumerate(data):
-            # Extract potential ID and FK
-            record_id = None
-            fk_val = None
+        df = pd.json_normalize(data)
 
-            # Simple heuristic to find keys
-            for k in record.keys():
-                k_lower = k.lower()
-                if '-id' in k_lower or k_lower == 'id':
-                    record_id = record[k]
-                if fk_col and (fk_col in k_lower or 'pregnancy_id' in k_lower):
-                    fk_val = record[k]
+        # Serialize list/dict columns to JSON strings
+        for col in df.columns:
+            sample = df[col].dropna().head(5)
+            if len(sample) > 0 and isinstance(sample.iloc[0], (list, dict)):
+                df[col] = df[col].apply(
+                    lambda x: json.dumps(x) if isinstance(x, (list, dict)) else x
+                )
 
-            # Fallback ID
-            if record_id is None:
-                record_id = f"{table_name}_{i}"
+        df.to_sql(table_name, engine, if_exists="replace", index=False)
+        logger.info(f"  ✓ {table_name}: {len(df):,} rows")
+    except Exception as exc:
+        logger.error(f"Failed {table_name}: {exc}")
+        raise
 
-            row = {'id': record_id, 'record_data': json.dumps(record)}
-            if fk_col:
-                row[fk_col] = fk_val
-            records.append(row)
 
-        df = pd.DataFrame(records)
+def load_json_normalized(
+    engine,
+    filepath: str | Path,
+    table_name: str,
+    comment: str = "",
+    skip_if_exists: bool = False,
+):
+    """
+    Load a large JSON array file into a relational table.
 
-        # We need JSONB type
-        from sqlalchemy.dialects.postgresql import JSONB
-        dtypes = {'record_data': JSONB}
-        if fk_col:
-            # Note: We won't enforce the FK constraint strictly immediately to avoid loading order issues,
-            # but we can add it subsequently.
-            pass
+    All fields are stored as typed columns (relational, not JSONB).
+    Uses psycopg2 COPY for high-throughput bulk insert.
 
-        df.to_sql(table_name, engine, if_exists='replace',
-                  index=False, dtype=dtypes)
+    Note: Loads the entire file into memory. For the ~375-394 MB raw
+    record files this requires ~2-3 GB RAM. Use --skip-raw-json to bypass.
+    """
+    filepath = Path(filepath)
+    if not filepath.exists():
+        logger.warning(f"File not found, skipping {table_name}: {filepath}")
+        return
+    if skip_if_exists and table_exists(engine, table_name):
+        count = get_row_count(engine, table_name)
+        if count > 0:
+            logger.info(f"Skipping {table_name} — already has {count:,} rows")
+            return
 
-        # Add primary key, foreign key, and comments explicitly via SQL
-        with engine.begin() as conn:
-            conn.execute(
-                text(f"ALTER TABLE {table_name} ADD PRIMARY KEY (id);"))
-            if table_comment:
-                conn.execute(
-                    text(f"COMMENT ON TABLE {table_name} IS '{table_comment}';"))
+    size_mb = filepath.stat().st_size / 1024 / 1024
+    logger.info(f"Loading {filepath.name} → {table_name} ({size_mb:.0f} MB, normalized JSON)…")
 
-            if fk_col and ref_table and ref_col:
+    logger.info("  Reading JSON into memory…")
+    with open(filepath) as f:
+        data = json.load(f)
+
+    if isinstance(data, dict):
+        keys = list(data.keys())
+        if len(keys) == 1 and isinstance(data[keys[0]], list):
+            data = data[keys[0]]
+        else:
+            data = [data]
+
+    logger.info(f"  Normalizing {len(data):,} records…")
+    df = pd.json_normalize(data)
+
+    # Serialize any remaining list/dict columns (e.g. embedded arrays)
+    for col in df.columns:
+        sample = df[col].dropna().head(5)
+        if len(sample) > 0 and isinstance(sample.iloc[0], (list, dict)):
+            df[col] = df[col].apply(
+                lambda x: json.dumps(x) if isinstance(x, (list, dict)) else x
+            )
+
+    # Create empty table structure
+    df.head(0).to_sql(table_name, engine, if_exists="replace", index=False)
+
+    # Bulk insert via COPY in batches
+    raw_conn = get_psycopg2_conn()
+    cursor = raw_conn.cursor()
+    total_rows = 0
+    start_time = datetime.now()
+
+    try:
+        for batch_start in range(0, len(df), BATCH_SIZE):
+            chunk = df.iloc[batch_start : batch_start + BATCH_SIZE]
+            buf = io.StringIO()
+            if batch_start == 0:
+                chunk.to_csv(buf, index=False, na_rep="")
+                buf.seek(0)
+                cursor.copy_expert(
+                    f"COPY {table_name} FROM STDIN WITH (FORMAT CSV, HEADER, NULL '')",
+                    buf,
+                )
+            else:
+                chunk.to_csv(buf, index=False, header=False, na_rep="")
+                buf.seek(0)
+                cursor.copy_expert(
+                    f"COPY {table_name} FROM STDIN WITH (FORMAT CSV, NULL '')",
+                    buf,
+                )
+            total_rows += len(chunk)
+            if total_rows % 100_000 == 0:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                rate = total_rows / elapsed if elapsed > 0 else 0
+                logger.info(f"  … {total_rows:,} rows ({rate:,.0f} rows/s)")
+                raw_conn.commit()
+
+        raw_conn.commit()
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(f"  ✓ {table_name}: {total_rows:,} rows in {elapsed:.1f}s")
+    except Exception as exc:
+        raw_conn.rollback()
+        logger.error(f"Failed {table_name}: {exc}")
+        raise
+    finally:
+        cursor.close()
+        raw_conn.close()
+
+
+# ===========================================================================
+# Schema objects — applied AFTER all data is loaded
+# ===========================================================================
+
+def apply_primary_keys(engine):
+    """Add primary keys and unique constraints to all tables."""
+    logger.info("Applying primary keys and unique constraints…")
+    statements = [
+        # Master reference
+        "ALTER TABLE master_districts ADD PRIMARY KEY (district_code_lgd);",
+        "ALTER TABLE master_blocks ADD PRIMARY KEY (block_code_lgd);",
+        "ALTER TABLE master_villages ADD PRIMARY KEY (village_id);",
+        "ALTER TABLE master_health_facilities ADD PRIMARY KEY (facility_id);",
+        # Core health data
+        "ALTER TABLE mother_journeys ADD PRIMARY KEY (mother_id);",
+        "ALTER TABLE mother_journeys ADD CONSTRAINT uq_pregnancy_id UNIQUE (pregnancy_id);",
+        "ALTER TABLE anc_visits ADD PRIMARY KEY (anc_id);",
+        # Raw records — surrogate serial key (natural keys may have duplicates/nulls)
+        "ALTER TABLE raw_anc_records ADD COLUMN row_id SERIAL PRIMARY KEY;",
+        "ALTER TABLE raw_child_records ADD COLUMN row_id SERIAL PRIMARY KEY;",
+        "ALTER TABLE raw_pregnancy_records ADD COLUMN row_id SERIAL PRIMARY KEY;",
+        # Reference JSON
+        "ALTER TABLE video_library ADD PRIMARY KEY (id);",
+        "ALTER TABLE research_articles ADD PRIMARY KEY (id);",
+        "ALTER TABLE nfhs_indicators ADD COLUMN id SERIAL PRIMARY KEY;",
+    ]
+    _exec_sql(engine, statements, "primary_keys")
+
+
+def apply_foreign_keys(engine):
+    """
+    Add foreign key constraints per cross_dataset_relations.json.
+    Each constraint is attempted independently; failures are logged but non-fatal
+    because source data may have referential gaps.
+    """
+    logger.info("Applying foreign key constraints…")
+    fk_statements = [
+        # anc_visits.mother_id → mother_journeys.mother_id
+        """
+        ALTER TABLE anc_visits
+          ADD CONSTRAINT fk_anc_mother_id
+          FOREIGN KEY (mother_id)
+          REFERENCES mother_journeys(mother_id)
+          ON DELETE CASCADE;
+        """,
+        # raw_anc_records.pregnancy_id → mother_journeys.pregnancy_id
+        """
+        ALTER TABLE raw_anc_records
+          ADD CONSTRAINT fk_raw_anc_pregnancy_id
+          FOREIGN KEY (pregnancy_id)
+          REFERENCES mother_journeys(pregnancy_id)
+          ON DELETE CASCADE;
+        """,
+        # raw_child_records.pregnancy_id → mother_journeys.pregnancy_id
+        """
+        ALTER TABLE raw_child_records
+          ADD CONSTRAINT fk_raw_child_pregnancy_id
+          FOREIGN KEY (pregnancy_id)
+          REFERENCES mother_journeys(pregnancy_id)
+          ON DELETE CASCADE;
+        """,
+        # raw_pregnancy_records.pregnancy_id → mother_journeys.pregnancy_id
+        """
+        ALTER TABLE raw_pregnancy_records
+          ADD CONSTRAINT fk_raw_preg_pregnancy_id
+          FOREIGN KEY (pregnancy_id)
+          REFERENCES mother_journeys(pregnancy_id)
+          ON DELETE CASCADE;
+        """,
+    ]
+    with engine.begin() as conn:
+        for sql in fk_statements:
+            try:
+                conn.execute(text(sql))
+            except Exception as exc:
+                logger.warning(f"[foreign_keys] skipped: {exc!s:.160}")
+
+
+def apply_indexes(engine):
+    """Create all indexes after data is loaded (much faster than incremental indexing)."""
+    logger.info("Creating indexes…")
+    statements = [
+        # --- Spatial GIST indexes (PostGIS) ---
+        "CREATE INDEX IF NOT EXISTS idx_states_geom          ON states          USING GIST (geometry);",
+        "CREATE INDEX IF NOT EXISTS idx_districts_geom       ON districts       USING GIST (geometry);",
+        "CREATE INDEX IF NOT EXISTS idx_dist_boundary_geom   ON district_boundaries USING GIST (geometry);",
+        "CREATE INDEX IF NOT EXISTS idx_subdistricts_geom    ON subdistricts    USING GIST (geometry);",
+        "CREATE INDEX IF NOT EXISTS idx_blocks_geom          ON blocks          USING GIST (geometry);",
+        "CREATE INDEX IF NOT EXISTS idx_villages_poly_geom   ON villages_poly   USING GIST (geometry);",
+        "CREATE INDEX IF NOT EXISTS idx_villages_point_geom  ON villages_point  USING GIST (geometry);",
+        "CREATE INDEX IF NOT EXISTS idx_health_fac_geom      ON health_facilities USING GIST (geom);",
+        "CREATE INDEX IF NOT EXISTS idx_anganwadi_geom       ON anganwadi_centres USING GIST (geom);",
+
+        # --- Mother / pregnancy lookups ---
+        "CREATE INDEX IF NOT EXISTS idx_mother_district_block ON mother_journeys (district, block);",
+        "CREATE INDEX IF NOT EXISTS idx_mother_reg_date       ON mother_journeys (registration_date);",
+        "CREATE INDEX IF NOT EXISTS idx_mother_delivery_date  ON mother_journeys (delivery_date);",
+        "CREATE INDEX IF NOT EXISTS idx_mother_pregnancy_id   ON mother_journeys (pregnancy_id);",
+
+        # --- ANC visits ---
+        "CREATE INDEX IF NOT EXISTS idx_anc_mother_id         ON anc_visits (mother_id);",
+        "CREATE INDEX IF NOT EXISTS idx_anc_visit_date        ON anc_visits (visit_date);",
+        "CREATE INDEX IF NOT EXISTS idx_anc_district_block    ON anc_visits (district, block);",
+
+        # --- Village indicators ---
+        "CREATE INDEX IF NOT EXISTS idx_village_ind_dist_block ON village_indicators_monthly (district_code_lgd, block_code_lgd);",
+        "CREATE INDEX IF NOT EXISTS idx_village_ind_yearmonth  ON village_indicators_monthly (year_month);",
+
+        # --- Geography code lookups ---
+        "CREATE INDEX IF NOT EXISTS idx_master_blocks_dist_code ON master_blocks (district_code_lgd);",
+        "CREATE INDEX IF NOT EXISTS idx_master_vil_block_code   ON master_villages (block_code_lgd);",
+        "CREATE INDEX IF NOT EXISTS idx_master_vil_dist_code    ON master_villages (district_code_lgd);",
+        "CREATE INDEX IF NOT EXISTS idx_master_vil_lgd_code     ON master_villages (village_code_lgd);",
+        "CREATE INDEX IF NOT EXISTS idx_master_hf_block_code    ON master_health_facilities (block_code_lgd);",
+        "CREATE INDEX IF NOT EXISTS idx_full_map_dist_block     ON geo_full_mapping (district_code_lgd, block_code_lgd);",
+
+        # --- Raw records — extracted FK columns ---
+        "CREATE INDEX IF NOT EXISTS idx_raw_anc_mother_id     ON raw_anc_records (mother_id);",
+        "CREATE INDEX IF NOT EXISTS idx_raw_anc_pregnancy_id  ON raw_anc_records (pregnancy_id);",
+        "CREATE INDEX IF NOT EXISTS idx_raw_child_mother_id   ON raw_child_records (mother_id);",
+        "CREATE INDEX IF NOT EXISTS idx_raw_child_pregnancy_id ON raw_child_records (pregnancy_id);",
+        "CREATE INDEX IF NOT EXISTS idx_raw_preg_mother_id    ON raw_pregnancy_records (mother_id);",
+        "CREATE INDEX IF NOT EXISTS idx_raw_preg_pregnancy_id ON raw_pregnancy_records (pregnancy_id);",
+
+        # --- NFHS lookup ---
+        "CREATE INDEX IF NOT EXISTS idx_nfhs_district_round   ON nfhs_indicators (district, nfhs_round);",
+
+        # --- Infrastructure code lookups ---
+        "CREATE INDEX IF NOT EXISTS idx_health_fac_block      ON health_facilities (block_code);",
+        "CREATE INDEX IF NOT EXISTS idx_health_fac_dist       ON health_facilities (district_code);",
+        "CREATE INDEX IF NOT EXISTS idx_anganwadi_block        ON anganwadi_centres (block_code);",
+        "CREATE INDEX IF NOT EXISTS idx_anganwadi_dist         ON anganwadi_centres (district_code);",
+    ]
+    _exec_sql(engine, statements, "indexes")
+
+
+def apply_comments(engine):
+    """Apply table-level and key column-level comments for schema documentation."""
+    logger.info("Applying table and column comments…")
+
+    table_comments = {
+        # Geographic
+        "states":
+            "Meghalaya state polygon with Census 2011 demographic attributes. 1 feature.",
+        "districts":
+            "Meghalaya district polygons with Census 2011 demographics (rural/urban split, workers, SC/ST). 12 features.",
+        "district_boundaries":
+            "Meghalaya district boundary polygons (2021 delineation) with area/length attributes. 12 features.",
+        "subdistricts":
+            "Meghalaya sub-district (block) polygons with Census demographics and agricultural data. 46 features.",
+        "blocks":
+            "Meghalaya block boundary polygons with area and length measurements. 46 features.",
+        "villages_poly":
+            "Village-level polygons for all 6,862 Meghalaya villages with Census 2011 demographic data.",
+        "villages_point":
+            "Village-level representative points for all 6,862 Meghalaya villages with Census 2011 data.",
+        # Master reference
+        "master_districts":
+            "Canonical district reference with LGD (Local Government Directory) codes. 12 districts.",
+        "master_blocks":
+            "Canonical block reference with LGD codes and parent district. 47 blocks.",
+        "master_villages":
+            "Village reference with LGD matching status (exact/unmatched). ~7,430 villages.",
+        "master_health_facilities":
+            "Health facility reference: PHCs, Sub-centres, and Other Public Facilities. ~1,799 facilities.",
+        "geo_full_mapping":
+            "Complete geographic hierarchy: district → block → facility → village with LGD match confidence.",
+        "geo_match_report":
+            "Quality report for village-to-LGD matching (exact vs. unmatched).",
+        # Infrastructure
+        "health_facilities":
+            "Health facility directory enriched with GPS coordinates (PostGIS POINT in 'geom'). ~646 facilities.",
+        "anganwadi_centres":
+            "ICDS Anganwadi Centre directory with GPS, infrastructure, and administrative data (~5,900 centres). PostGIS POINT in 'geom'.",
+        # Geography mapping
+        "meghealth_geo_mapping":
+            "Facility-to-village mapping: district → block → PHC → sub-centre → village hierarchy used in Meghealth.",
+        # Health data
+        "mother_journeys":
+            "Complete maternal journey from pregnancy registration through delivery and child outcome. ~363,898 records. PK: mother_id, UNIQUE: pregnancy_id.",
+        "anc_visits":
+            "Antenatal Care (ANC) visit records with clinical vitals (weight, BP, Hb), medications, and danger signs. ~361,551 records. PK: anc_id, FK: mother_id → mother_journeys.",
+        "village_indicators_monthly":
+            "Monthly aggregated maternal and child health indicators at village level. ~133,071 records.",
+        # Raw records
+        "raw_anc_records":
+            "Raw API response records for ANC visits — normalized relational table. All original API fields preserved. ~361,508 records.",
+        "raw_child_records":
+            "Raw API response records for child/infant data — normalized relational table. ~192 MB source.",
+        "raw_pregnancy_records":
+            "Raw API response records for pregnancy journeys — normalized relational table. ~394 MB source. pregnancy_id FK → mother_journeys.",
+        # Reference JSON
+        "nfhs_indicators":
+            "National Family Health Survey (NFHS) rounds 3/4/5 district-level health indicators. 624 records.",
+        "video_library":
+            "Educational video metadata for ASHA/ANM health workers (breastfeeding, nutrition, immunization etc). ~49 videos.",
+        "research_articles":
+            "Peer-reviewed research articles on maternal and child health in Meghalaya/Northeast India. 23 articles.",
+    }
+
+    col_comments = {
+        "mother_journeys": {
+            "mother_id":
+                "Unique identifier for the mother in the Meghealth system. Primary key.",
+            "pregnancy_id":
+                "Pregnancy-specific composite ID, format: '{mother_id} - {sno}'. Referenced by raw_*_records tables.",
+            "gps_location":
+                "GPS location as WKT string (POINT lon lat). Convert to geometry with: ST_GeomFromText(gps_location, 4326).",
+            "district":
+                "District name (free-text, not normalized). Join to master_districts for LGD codes.",
+            "high_risk_at_registration":
+                "Boolean flag for high-risk pregnancy at time of registration.",
+        },
+        "anc_visits": {
+            "anc_id":    "Unique ANC visit identifier. Primary key.",
+            "mother_id": "FK → mother_journeys.mother_id.",
+            "visit_date":"Date of ANC visit. Indexed for time-series queries.",
+        },
+        "villages_point": {
+            "geometry": "PostGIS POINT (EPSG:4326). Village representative GPS point.",
+        },
+        "villages_poly": {
+            "geometry": "PostGIS POLYGON (EPSG:4326). Village boundary polygon.",
+        },
+        "districts": {
+            "geometry": "PostGIS MULTIPOLYGON (EPSG:4326). District boundary.",
+        },
+        "blocks": {
+            "geometry": "PostGIS MULTIPOLYGON (EPSG:4326). Block boundary.",
+        },
+        "health_facilities": {
+            "geom":      "PostGIS POINT (EPSG:4326). Facility GPS location.",
+            "facility_id":"Unique facility identifier. Matches master_health_facilities.facility_id.",
+        },
+        "anganwadi_centres": {
+            "geom":               "PostGIS POINT (EPSG:4326). Centre GPS location.",
+            "anganwadi_centre_id":"Unique centre identifier.",
+            "geometry_x":         "Longitude (same as 'longitude' column, kept for source compatibility).",
+            "geometry_y":         "Latitude (same as 'latitude' column, kept for source compatibility).",
+        },
+        "raw_anc_records": {
+            "row_id":     "Surrogate primary key (SERIAL). Added during migration.",
+            "mother_id":  "Extracted from JSON for indexing. FK → mother_journeys.mother_id.",
+            "pregnancy_id":"Extracted from JSON for FK → mother_journeys.pregnancy_id (if present).",
+        },
+        "raw_child_records": {
+            "row_id":     "Surrogate primary key (SERIAL). Added during migration.",
+            "mother_id":  "Extracted from JSON for indexing. FK → mother_journeys.mother_id.",
+            "pregnancy_id":"Extracted from JSON for FK → mother_journeys.pregnancy_id (if present).",
+        },
+        "raw_pregnancy_records": {
+            "row_id":       "Surrogate primary key (SERIAL). Added during migration.",
+            "mother_id":    "Extracted from JSON for indexing.",
+            "pregnancy_id": "Pregnancy ID in format '{mother_id} - {sno}'. FK → mother_journeys.pregnancy_id.",
+        },
+        "master_villages": {
+            "village_id":        "Primary key, format: 'V-NNNNN'.",
+            "village_code_lgd":  "LGD village census code (NULL if unmatched).",
+            "match_confidence":  "LGD matching quality: 'exact' or 'unmatched'.",
+        },
+        "nfhs_indicators": {
+            "nfhs_round":   "NFHS survey round (3, 4, or 5).",
+            "survey_year":  "Survey year range (e.g. '2019-21').",
+            "district":     "District or state name from NFHS report.",
+            "total":        "Total (combined rural+urban) indicator value.",
+        },
+    }
+
+    with engine.begin() as conn:
+        for tbl, comment in table_comments.items():
+            try:
+                safe = comment.replace("'", "''")
+                conn.execute(text(f"COMMENT ON TABLE {tbl} IS '{safe}';"))
+            except Exception as exc:
+                logger.warning(f"[comments] {tbl}: {exc!s:.80}")
+
+        for tbl, cols in col_comments.items():
+            for col, comment in cols.items():
                 try:
-                    conn.execute(text(f"""
-                        ALTER TABLE {table_name} 
-                        ADD CONSTRAINT fk_{table_name}_{ref_table} 
-                        FOREIGN KEY ({fk_col}) REFERENCES {ref_table}({ref_col}) ON DELETE CASCADE;
-                    """))
-                except Exception as fk_err:
-                    logger.warning(
-                        f"Could not apply FK constraint for {table_name}: {fk_err}")
-
-        logger.info(
-            f"Successfully loaded {table_name} with {len(df)} records.")
-    except Exception as e:
-        logger.error(f"Failed to load JSON {table_name}: {e}")
+                    safe = comment.replace("'", "''")
+                    conn.execute(text(f"COMMENT ON COLUMN {tbl}.{col} IS '{safe}';"))
+                except Exception as exc:
+                    logger.warning(f"[comments] {tbl}.{col}: {exc!s:.80}")
 
 
-def run_migration():
+# ===========================================================================
+# Migration orchestrator
+# ===========================================================================
+
+def run_migration(args):
+    only = getattr(args, "only", None)
+    skip_raw_json = getattr(args, "skip_raw_json", False)
+    skip_if_exists = getattr(args, "skip_if_exists", False)
+
+    def stage(name: str) -> bool:
+        return only is None or only == name
+
     engine = get_engine()
     create_extensions(engine)
 
-    base_dir = '/Users/tattva/_Projects/mecdm-super-agent/mecdm_dataset/db_20260226'
-    geo_dir = os.path.join(base_dir, 'Meghalaya Master Data')
-    output_dir = os.path.join(base_dir, 'output')
+    # ------------------------------------------------------------------
+    # 1. Geographic tables (GeoJSON → PostGIS)
+    # ------------------------------------------------------------------
+    if stage("geo"):
+        logger.info("=== Stage: Geographic tables ===")
+        load_geojson(engine, GEO_DIR / "04_state.geojson", "states",
+                     comment="Meghalaya state polygon — Census 2011")
+        load_geojson(engine, GEO_DIR / "03_district.geojson", "districts",
+                     comment="District polygons with Census demographics")
+        load_geojson(engine, GEO_DIR / "04_district_boundary_2021.geojson", "district_boundaries",
+                     comment="District boundaries (2021 delineation)")
+        load_geojson(engine, GEO_DIR / "02_subdistrict.geojson", "subdistricts",
+                     comment="Sub-district (block) polygons with Census data")
+        load_geojson(engine, GEO_DIR / "06_block_boundary_46_nos.geojson", "blocks",
+                     comment="Block boundary polygons — 46 blocks")
+        load_geojson(engine, GEO_DIR / "01_village_poly.geojson", "villages_poly",
+                     comment="Village boundary polygons — 6,862 villages")
+        load_geojson(engine, GEO_DIR / "00_village_point.geojson", "villages_point",
+                     comment="Village representative points — 6,862 villages")
 
-    # 1. Geographic Tables (GeoJSON)
-    load_geojson(engine, os.path.join(geo_dir, '04_state.geojson'), 'states')
-    load_geojson(engine, os.path.join(
-        geo_dir, '03_district.geojson'), 'districts')
-    load_geojson(engine, os.path.join(
-        geo_dir, '02_subdistrict.geojson'), 'subdistricts')
-    load_geojson(engine, os.path.join(
-        geo_dir, '01_village_poly.geojson'), 'villages_poly')
-    load_geojson(engine, os.path.join(
-        geo_dir, '00_village_point.geojson'), 'villages_point')
+    # ------------------------------------------------------------------
+    # 2. Master reference tables (small CSVs)
+    # ------------------------------------------------------------------
+    if stage("master"):
+        logger.info("=== Stage: Master reference tables ===")
+        load_csv_small(engine, MASTER_DIR / "master_districts.csv", "master_districts")
+        load_csv_small(engine, MASTER_DIR / "master_blocks.csv", "master_blocks")
+        load_csv_small(engine, MASTER_DIR / "master_villages.csv", "master_villages")
+        load_csv_small(engine, MASTER_DIR / "master_health_facilities.csv", "master_health_facilities")
+        load_csv_small(engine, MASTER_DIR / "full_mapping.csv", "geo_full_mapping")
+        load_csv_small(engine, MASTER_DIR / "match_report.csv", "geo_match_report")
 
-    # 2. Key Master Data & Tracking (CSV)
-    # Using specific files found in exploration
-    mother_journeys_path = os.path.join(output_dir, 'mother_journeys.csv')
-    if os.path.exists(mother_journeys_path):
-        load_csv(engine, mother_journeys_path, 'mother_journeys')
-        # Make pregnancy_id Unique so we can reference it
-        with engine.begin() as conn:
-            try:
-                conn.execute(
-                    text("ALTER TABLE mother_journeys ADD PRIMARY KEY (mother_id);"))
-                conn.execute(text(
-                    "ALTER TABLE mother_journeys ADD CONSTRAINT unique_pregnancy_id UNIQUE (pregnancy_id);"))
-            except:
-                pass
+    # ------------------------------------------------------------------
+    # 3. Infrastructure tables (CSV with PostGIS points)
+    # ------------------------------------------------------------------
+    if stage("infra"):
+        logger.info("=== Stage: Infrastructure tables ===")
+        load_csv_with_points(
+            engine,
+            GEO_DIR / "dashboard_health_facilities_codes_enriched.csv",
+            "health_facilities",
+            lat_col="latitude", lon_col="longitude",
+        )
+        load_csv_with_points(
+            engine,
+            GEO_DIR / "anganwadi_centre_0_anganwadi_centre.csv",
+            "anganwadi_centres",
+            lat_col="latitude", lon_col="longitude",
+        )
 
-    anc_visits_path = os.path.join(output_dir, 'anc_visits_detail.csv')
-    if os.path.exists(anc_visits_path):
-        load_csv(engine, anc_visits_path, 'anc_visits')
+    # ------------------------------------------------------------------
+    # 4. Geography mapping
+    # ------------------------------------------------------------------
+    if stage("infra") or stage("master"):
+        load_csv_small(engine, OUTPUT_DIR / "meghealth_geography_mapping.csv", "meghealth_geo_mapping")
 
-    facilities_path = os.path.join(
-        geo_dir, 'dashboard_health_facilities_codes_enriched.csv')
-    if os.path.exists(facilities_path):
-        load_csv(engine, facilities_path, 'health_facilities',
-                 lat_col='latitude', lon_col='longitude')
+    # ------------------------------------------------------------------
+    # 5. Health data tables (large CSVs — COPY protocol)
+    # ------------------------------------------------------------------
+    if stage("health"):
+        logger.info("=== Stage: Health data tables ===")
+        load_csv_large(
+            engine,
+            OUTPUT_DIR / "mother_journeys.csv",
+            "mother_journeys",
+            skip_if_exists=skip_if_exists,
+        )
+        load_csv_large(
+            engine,
+            OUTPUT_DIR / "anc_visits_detail.csv",
+            "anc_visits",
+            skip_if_exists=skip_if_exists,
+        )
+        load_csv_small(engine, OUTPUT_DIR / "village_indicators_monthly.csv", "village_indicators_monthly")
 
-    anganwadi_path = os.path.join(
-        geo_dir, 'anganwadi_centre_0_anganwadi_centre.csv')
-    if os.path.exists(anganwadi_path):
-        load_csv(engine, anganwadi_path, 'anganwadi_centres',
-                 lat_col='latitude', lon_col='longitude')
+    # ------------------------------------------------------------------
+    # 6. Raw JSON records (large — normalized relational tables)
+    # ------------------------------------------------------------------
+    if stage("raw_json") and not skip_raw_json:
+        logger.info("=== Stage: Raw JSON records (normalized relational) ===")
+        logger.warning(
+            "Loading ~961 MB of JSON data. This requires ~3-4 GB RAM. "
+            "Use --skip-raw-json to bypass."
+        )
+        load_json_normalized(
+            engine,
+            OUTPUT_DIR / "raw_anc_records.json",
+            "raw_anc_records",
+            skip_if_exists=skip_if_exists,
+        )
+        load_json_normalized(
+            engine,
+            OUTPUT_DIR / "raw_child_records.json",
+            "raw_child_records",
+            skip_if_exists=skip_if_exists,
+        )
+        load_json_normalized(
+            engine,
+            OUTPUT_DIR / "raw_pregnancy_records.json",
+            "raw_pregnancy_records",
+            skip_if_exists=skip_if_exists,
+        )
+    elif skip_raw_json:
+        logger.info("Skipping raw JSON records (--skip-raw-json)")
 
-    indicators_path = os.path.join(
-        output_dir, 'village_indicators_monthly.csv')
-    if os.path.exists(indicators_path):
-        load_csv(engine, indicators_path, 'village_indicators_monthly')
+    # ------------------------------------------------------------------
+    # 7. Reference JSON tables (small — flat relational)
+    # ------------------------------------------------------------------
+    if stage("ref_json"):
+        logger.info("=== Stage: Reference JSON tables ===")
+        load_json_flat(engine, OUTPUT_DIR / "nfhs_indicators.json", "nfhs_indicators")
+        load_json_flat(engine, OUTPUT_DIR / "video_library.json", "video_library")
+        load_json_flat(engine, OUTPUT_DIR / "research_articles.json", "research_articles")
 
-    # 3. Raw JSON Data with explicit FKs and comments
-    load_json_records(
-        engine,
-        os.path.join(output_dir, 'raw_anc_records.json'),
-        'raw_anc_records',
-        fk_col='pregnancy_id',
-        ref_table='mother_journeys',
-        ref_col='pregnancy_id',
-        table_comment="Raw API JSON responses for ANC details."
-    )
-
-    load_json_records(
-        engine,
-        os.path.join(output_dir, 'raw_child_records.json'),
-        'raw_child_records',
-        fk_col='pregnancy_id',
-        ref_table='mother_journeys',
-        ref_col='pregnancy_id',
-        table_comment="Raw API JSON responses for Child details."
-    )
-
-    load_json_records(
-        engine,
-        os.path.join(output_dir, 'raw_pregnancy_records.json'),
-        'raw_pregnancy_records',
-        fk_col='pregnancy_id',
-        ref_table='mother_journeys',
-        ref_col='pregnancy_id',
-        table_comment="Raw API JSON responses for Pregnancy metadata."
-    )
-
-    load_json_records(
-        engine,
-        os.path.join(output_dir, 'research_articles.json'),
-        'research_articles',
-        table_comment="Raw structured JSON for health research articles."
-    )
-
-    load_json_records(
-        engine,
-        os.path.join(output_dir, 'video_library.json'),
-        'video_library',
-        table_comment="Raw structured JSON for the video library."
-    )
-
-    load_json_records(
-        engine,
-        os.path.join(output_dir, 'nfhs_indicators.json'),
-        'nfhs_indicators',
-        table_comment="Raw structured JSON for NFHS indicator data."
-    )
+    # ------------------------------------------------------------------
+    # 8. Schema objects — PKs, FKs, indexes, comments (ALWAYS last)
+    # ------------------------------------------------------------------
+    if stage("schema") or only is None:
+        logger.info("=== Stage: Schema objects (PKs, FKs, indexes, comments) ===")
+        apply_primary_keys(engine)
+        apply_foreign_keys(engine)
+        apply_indexes(engine)
+        apply_comments(engine)
 
     logger.info("Migration complete!")
 
 
+# ===========================================================================
+# Entry point
+# ===========================================================================
+
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="MECDM SuperApp — AlloyDB migration script",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "--only",
+        choices=["geo", "master", "infra", "health", "raw_json", "ref_json", "schema"],
+        default=None,
+        metavar="STAGE",
+        help="Run only a specific migration stage.",
+    )
+    parser.add_argument(
+        "--skip-raw-json",
+        action="store_true",
+        help="Skip the three large raw JSON files (~961 MB total).",
+    )
+    parser.add_argument(
+        "--skip-if-exists",
+        action="store_true",
+        help="For large tables: skip loading if the table already has rows.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    run_migration()
+    args = _parse_args()
+    run_migration(args)
