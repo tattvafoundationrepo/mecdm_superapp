@@ -134,52 +134,23 @@ def alloydb_nl2sql(
     """
 
     prompt_template = """
-You are an AlloyDB and PostgreSQL expert tasked with translating a user's
-questions about AlloyDB or Postgres tables into a valid SQL query in the
-PostgreSQL dialect. Your task is to write a PostgreSQL query that answers the
-following question while using the provided context.
+Translate the health data question below into a valid PostgreSQL query using the provided schema.
 
-**Guidelines:**
+Rules:
+- Reference tables as "table_name" (double-quoted, case-sensitive).
+- Use ONLY columns listed in the schema. Associate each column with its correct table.
+- Minimize joins. Ensure matching data types on join columns.
+- Include all non-aggregated SELECT columns in GROUP BY.
+- Apply WHERE/HAVING filters to minimize returned rows.
 
-- **Table Referencing:** Tables should be referred to using the table name
-  enclosed in double quotes (") e.g. "table_name". Table names are case
-  sensitive.
-- **Joins:** Join as few tables as possible. When joining tables, ensure all
-  join columns are the same data type. Analyze the database and the table schema
-  provided to understand the relationships between columns and tables.
-- **Aggregations:**  Use all non-aggregated columns from the "SELECT" statement
-  in the `GROUP BY` clause.
-- **SQL Syntax:** Return syntactically and semantically correct SQL for
-  Postgres / AlloyDb with proper relation mapping (i.e., project_id, owner,
-  table, and column relation). Use SQL `AS` statement to assign a new name
-  temporarily to a table column or even a table wherever needed. Always enclose
-  subqueries and union queries in parentheses.
-- **Column Usage:** Use *ONLY* the column names (column_name) mentioned in the
-  Table Schema. Do *NOT* use any other column names. Associate `column_name`
-  mentioned in the Table Schema only to the `table_name` specified under Table
-  Schema.
-- **FILTERS:** You should write the query effectively  to reduce and minimize the
-  total rows to be returned. For example, you can use filters (like `WHERE`,
-  `HAVING`, etc. (like 'COUNT', 'SUM', etc.) in the SQL query.
-
-**Schema:**
-
-The database structure is defined by the following table schemas (possibly with
-sample rows):
-
+Schema:
 ```
 {SCHEMA}
 ```
 
-**Natural language question:**
+Question: {QUESTION}
 
-```
-{QUESTION}
-```
-
-**Think Step-by-Step:** Carefully consider the schema, question, guidelines, and
-  best practices outlined above to generate the correct PostgreSQL.
-
+Generate the PostgreSQL query.
    """
 
     schema = tool_context.state["database_settings"]["alloydb"]["schema"]
