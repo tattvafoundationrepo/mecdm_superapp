@@ -90,6 +90,8 @@ async def call_analytics_agent(
   {alloydb_data}
   </ALLOYDB>
 
+  IMPORTANT: Return your computed results as JSON data arrays using print(json.dumps(...)).
+  Do NOT generate matplotlib plots or images. The frontend will render charts from your JSON data.
   """
 
     agent_tool = AgentTool(agent=analytics_agent)

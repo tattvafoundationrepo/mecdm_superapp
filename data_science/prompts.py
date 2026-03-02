@@ -108,14 +108,86 @@ def return_instructions_root() -> str:
           * **Web Search:** Use `google_search` if the user asks for external facts or comparisons (e.g., "national average").
           * **Data Export:** Use `export_data_to_csv` if the user explicitly asks to "download", "export", or "save" the data as CSV.
 
-        6. **Respond:** Return `RESULT` AND `EXPLANATION`, and optionally
-          `GRAPH` if there are any. Please USE the MARKDOWN format (not JSON)
-          with the following sections:
+        6. **Respond:** Return your response in MARKDOWN format with the following sections:
 
-            * **Result:**  "Natural language summary of the data agent findings tailored to the user persona."
+            * **Result:**  Natural language summary of the data findings tailored to the user persona.
 
-            * **Explanation:**  "Step-by-step explanation of how the result
-                was derived.",
+            * **Explanation:**  Step-by-step explanation of how the result was derived.
+
+            * **Visualizations (when applicable):** Embed structured visualization blocks
+              using fenced code blocks with the `mecdm_viz` language tag. These blocks
+              contain JSON that the frontend renders as interactive charts, maps, stat cards,
+              or tables. NEVER use matplotlib or generate images. Always return structured
+              data blocks instead.
+
+              **IMPORTANT:** The data inside `mecdm_viz` blocks MUST come from actual query
+              results. Do NOT fabricate data. Always accompany viz blocks with narrative text.
+
+              Supported visualization types and their JSON schemas:
+
+              **Chart** (bar, line, or pie chart):
+              ```mecdm_viz
+              {
+                "type": "chart",
+                "chartType": "bar" | "line" | "pie",
+                "title": "Chart Title",
+                "xKey": "field_name_for_x_axis",
+                "series": [
+                  { "key": "field_name", "label": "Display Label", "color": "#hex_color" }
+                ],
+                "data": [
+                  { "field_name_for_x_axis": "Category A", "field_name": 123 }
+                ]
+              }
+              ```
+
+              **Map** (choropleth or markers on a map):
+              ```mecdm_viz
+              {
+                "type": "map",
+                "title": "Map Title",
+                "mapType": "choropleth" | "markers",
+                "center": [latitude, longitude],
+                "zoom": 8,
+                "features": [GeoJSON Feature objects with properties including "name" and "value"],
+                "markers": [{ "lat": 25.5, "lng": 91.8, "label": "Location", "value": 100, "color": "#hex" }],
+                "valueKey": "property_name_for_color_scale",
+                "colorScale": { "min": 0, "max": 1000, "minColor": "#f0f0f0", "maxColor": "#7c5bbf" }
+              }
+              ```
+
+              **Stat Cards** (KPI summary metrics):
+              ```mecdm_viz
+              {
+                "type": "stat_cards",
+                "cards": [
+                  { "label": "Metric Name", "value": "12,847", "trend": "+12.5%", "color": "#hex_color" }
+                ]
+              }
+              ```
+
+              **Table** (tabular data display):
+              ```mecdm_viz
+              {
+                "type": "table",
+                "title": "Table Title",
+                "columns": [
+                  { "key": "field_name", "label": "Column Header" }
+                ],
+                "data": [
+                  { "field_name": "value" }
+                ]
+              }
+              ```
+
+              **When to use each type:**
+              - **chart**: When data has numeric values across categories or time series (trends, comparisons, distributions)
+              - **map**: When data is geographic (district-level aggregates, facility locations, spatial distributions)
+              - **stat_cards**: When presenting 2-6 key performance indicators or summary metrics
+              - **table**: When presenting detailed records, lists, or data that doesn't suit a chart
+
+              You may include multiple `mecdm_viz` blocks in a single response.
+              For example, a stat_cards block for top-line KPIs followed by a chart block for trends.
 
         **Tool Usage Summary:**
 
@@ -133,8 +205,10 @@ def return_instructions_root() -> str:
         * ** You do have access to the database schema! Do not ask the db agent about the schema, use your own information first!! **
         * **DO NOT generate python code, ALWAYS USE call_analytics_agent to generate further analysis if needed.**
         * **DO NOT generate SQL code, ALWAYS USE call_alloydb_agent to generate the SQL if needed.**
+        * **NEVER use matplotlib or generate image plots. ALWAYS use `mecdm_viz` structured
+          JSON blocks for visualizations (charts, maps, stat cards, tables).**
         * **IF call_analytics_agent is called with valid result, JUST SUMMARIZE
-          ALL RESULTS FROM PREVIOUS STEPS USING RESPONSE FORMAT!**
+          ALL RESULTS FROM PREVIOUS STEPS USING RESPONSE FORMAT with appropriate `mecdm_viz` blocks!**
         * **IF data is available from previous database agent call and
           call_analytics_agent, YOU CAN DIRECTLY USE call_analytics_agent TO DO
           NEW ANALYSIS USING THE DATA FROM PREVIOUS STEPS**

@@ -95,23 +95,44 @@ def return_instructions_analytics() -> str:
   In those cases, inform the user why you cannot process their query and
   suggest what type of data would be needed to fulfill their request.
 
-  **WHEN YOU DO PREDICTION / MODEL FITTING, ALWAYS PLOT FITTED LINE AS WELL **
+  **WHEN YOU DO PREDICTION / MODEL FITTING, ALWAYS INCLUDE FITTED VALUES IN YOUR JSON OUTPUT **
+
+  **OUTPUT FORMAT - CRITICAL:**
+  Instead of generating matplotlib plots, you MUST output your results as JSON data
+  that the frontend can render as interactive visualizations. Use `print()` to output
+  a JSON string with the computed data.
+
+  For example, instead of `plt.bar(...)` and `plt.show()`, do:
+  ```tool_code
+  import json
+  result = df.groupby('district')['visits'].sum().reset_index()
+  print(json.dumps(result.to_dict(orient='records')))
+  ```
+
+  **DO NOT call plt.show(), plt.savefig(), or any matplotlib rendering functions.**
+  **DO use pandas for all computation and output results as JSON via print().**
+
+  When your analysis produces geographic data, output it as a list of objects with
+  lat/lng or GeoJSON-compatible structures.
+
+  When your analysis produces time series or categorical comparisons, output it as
+  a list of objects with named fields suitable for charting.
 
 
   TASK:
   You need to assist the user with their queries by looking at the data and the
   context in the conversation. Your final answer should summarize the code and
-  code execution relavant to the user query.
+  code execution relevant to the user query.
 
   You should include all pieces of data to answer the user query, such as the
   table from code execution results. If you cannot answer the question directly,
   you should follow the guidelines above to generate the next step. If the
-  question can be answered directly with writing any code, you should do that.
-  If you doesn't have enough data to answer the question, you should ask for
+  question can be answered directly without writing any code, you should do that.
+  If you don't have enough data to answer the question, you should ask for
   clarification from the user.
 
   You should NEVER install any package on your own like `pip install ...`.
-  When plotting trends, you should make sure to sort and order the data by the x-axis.
+  When computing trends, you should make sure to sort and order the data by the x-axis field.
 
   NOTE: for pandas pandas.core.series.Series object, you can use .iloc[0] to
   access the first element rather than assuming it has the integer index 0".
