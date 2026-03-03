@@ -21,6 +21,7 @@ from google.adk.tools import ToolContext
 from google.adk.tools.agent_tool import AgentTool
 
 from .sub_agents import alloydb_agent, analytics_agent
+from .sub_agents.alloydb.tools import get_toolbox_client
 from .utils.map_utils import (
     FACILITY_QUERY,
     AWC_QUERY,
@@ -32,7 +33,6 @@ from .utils.map_utils import (
     build_find_nearest_viz_block,
     build_geojson_features,
     build_mecdm_viz_block,
-    compute_color_scale,
     format_viz_block_as_markdown,
     parse_query_results,
 )
@@ -260,13 +260,21 @@ async def export_data_to_csv(data_json: str, filename: str, tool_context: ToolCo
         return f"Error exporting data: {e}"
 
 
-async def _run_alloydb_query(question: str, tool_context: ToolContext) -> str:
-    """Internal helper to run a query via the AlloyDB sub-agent."""
-    agent_tool = AgentTool(agent=alloydb_agent)
-    output = await agent_tool.run_async(
-        args={"request": question}, tool_context=tool_context
-    )
-    return output
+def _execute_sql_direct(sql: str) -> list:
+    """Execute a pre-defined SQL query directly via the MCP Toolbox.
+
+    Bypasses the AlloyDB LLM sub-agent since no NL2SQL translation is needed
+    for known geometry/overlay queries. Returns parsed results as a list of dicts.
+    """
+    try:
+        execute_sql_tool = get_toolbox_client().load_tool("execute_sql")
+        results = execute_sql_tool(sql)
+        if results:
+            return parse_query_results(results)
+        return []
+    except Exception as e:
+        logger.error("[_execute_sql_direct] SQL execution failed: %s", e)
+        return []
 
 
 async def generate_map_viz(
@@ -338,14 +346,7 @@ async def generate_map_viz(
         return f"Error: No geometry query defined for geography_level={geography_level}."
 
     logger.info("[generate_map_viz] Fetching geometry: %s", geo_query[:100])
-    geo_output = await _run_alloydb_query(
-        f"Execute this exact SQL query and return all results: {geo_query}",
-        tool_context,
-    )
-
-    geo_data = parse_query_results(
-        tool_context.state.get("alloydb_query_result", geo_output)
-    )
+    geo_data = _execute_sql_direct(geo_query)
     if not geo_data:
         return "Error: Could not fetch geometry data from PostGIS."
 
@@ -374,13 +375,7 @@ async def generate_map_viz(
     facility_overlay = None
     if overlay_facilities:
         logger.info("[generate_map_viz] Fetching facility overlay")
-        await _run_alloydb_query(
-            f"Execute this exact SQL query and return all results: {FACILITY_QUERY}",
-            tool_context,
-        )
-        fac_data = parse_query_results(
-            tool_context.state.get("alloydb_query_result", "")
-        )
+        fac_data = _execute_sql_direct(FACILITY_QUERY)
         if fac_data:
             facility_overlay = build_facility_overlay(fac_data)
 
@@ -388,13 +383,7 @@ async def generate_map_viz(
     awc_overlay = None
     if overlay_awc:
         logger.info("[generate_map_viz] Fetching AWC overlay")
-        await _run_alloydb_query(
-            f"Execute this exact SQL query and return all results: {AWC_QUERY}",
-            tool_context,
-        )
-        awc_data = parse_query_results(
-            tool_context.state.get("alloydb_query_result", "")
-        )
+        awc_data = _execute_sql_direct(AWC_QUERY)
         if awc_data:
             awc_overlay = build_awc_overlay(awc_data)
 
@@ -435,7 +424,6 @@ async def find_nearest_facilities(
     from_district: str = "",
     from_block: str = "",
     show_map: bool = True,
-    tool_context: ToolContext = None,
 ) -> str:
     """Find the nearest health facilities or AWCs from a specified village.
 
@@ -450,7 +438,6 @@ async def find_nearest_facilities(
         from_district: Optional district name to disambiguate the village.
         from_block: Optional block name to disambiguate the village.
         show_map: If True, returns a mecdm_viz map block with markers and distance lines.
-        tool_context: ADK tool context (injected automatically).
 
     Returns:
         Ranked list of nearest facilities with distances, plus optional map visualization.
@@ -476,12 +463,7 @@ async def find_nearest_facilities(
         f'FROM "villages_point" WHERE {village_where} AND "geom" IS NOT NULL LIMIT 5'
     )
 
-    await _run_alloydb_query(
-        f"Execute this exact SQL query: {village_query}", tool_context,
-    )
-    village_data = parse_query_results(
-        tool_context.state.get("alloydb_query_result", "")
-    )
+    village_data = _execute_sql_direct(village_query)
 
     if not village_data:
         return f"Could not find village matching '{from_village}'. Try a different spelling or add district/block filters."
@@ -532,12 +514,7 @@ async def find_nearest_facilities(
             f'ORDER BY distance_km LIMIT {count}'
         )
 
-    await _run_alloydb_query(
-        f"Execute this exact SQL query: {target_query}", tool_context,
-    )
-    nearest_data = parse_query_results(
-        tool_context.state.get("alloydb_query_result", "")
-    )
+    nearest_data = _execute_sql_direct(target_query)
 
     if not nearest_data:
         return f"No {to_type} facilities found near '{from_village}'."
