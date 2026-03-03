@@ -38,6 +38,8 @@ from .tools import (
     call_alloydb_agent,
     call_analytics_agent,
     export_data_to_csv,
+    find_nearest_facilities,
+    generate_map_viz,
     get_current_datetime,
     get_historical_weather_data,
     get_weather_data,
@@ -145,6 +147,8 @@ def load_database_settings_in_context(callback_context: CallbackContext):
 def get_root_agent() -> LlmAgent:
     tools = [
         call_analytics_agent,
+        generate_map_viz,
+        find_nearest_facilities,
         get_current_datetime,
         get_weather_data,
         get_historical_weather_data,
