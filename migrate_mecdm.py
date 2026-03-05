@@ -1019,174 +1019,160 @@ def apply_comments(engine):
     table_comments = {
         # Geographic
         "states":
-            "Meghalaya state polygon with Census 2011 demographic attributes. 1 feature.",
+            "Meghalaya state polygon with Census 2011 demographics — total population, literacy rates, worker categories, and SC/ST counts.",
         "districts":
-            "Meghalaya district polygons with Census 2011 demographics (rural/urban split, workers, SC/ST). 12 features.",
+            "12 Meghalaya district polygons with Census 2011 demographics including rural/urban population split, male/female worker counts, and SC/ST populations.",
         "district_boundaries":
-            "Meghalaya district boundary polygons (2021 delineation) with area/length attributes. 12 features.",
+            "12 Meghalaya district boundaries based on the 2021 administrative delineation, with calculated area and perimeter.",
         "subdistricts":
-            "Meghalaya sub-district (block) polygons with Census demographics and agricultural data. 46 features.",
+            "46 Meghalaya sub-district (C&RD block) polygons with Census 2011 demographics and agricultural worker breakdowns.",
         "blocks":
-            "Meghalaya block boundary polygons with area and length measurements. 46 features.",
+            "46 Meghalaya block boundaries with area and perimeter measurements. Source lacks LGD codes — linked to districts by name only.",
         "villages_poly":
-            "Village-level polygons for all 6,862 Meghalaya villages with Census 2011 demographic data.",
+            "Boundary polygons for ~6,862 Meghalaya villages with Census 2011 household counts, population, literacy, and worker data.",
         "villages_point":
-            "Village-level representative points for all 6,862 Meghalaya villages with Census 2011 data.",
+            "Representative GPS points for ~6,862 Meghalaya villages with Census 2011 household counts, population, literacy, and worker data.",
         # Master reference
         "master_districts":
-            "Canonical district reference with LGD (Local Government Directory) codes. 12 districts.",
+            "Canonical district reference linking district names to LGD (Local Government Directory) codes. 12 districts. Enriched with centroid geometry derived from district polygons.",
         "master_blocks":
-            "Canonical block reference with LGD codes and parent district. 47 blocks.",
+            "Canonical block reference linking block names to LGD codes and parent districts. 47 blocks. Enriched with centroid geometry derived from sub-district polygons.",
         "master_villages":
-            "Village reference with LGD matching status (exact/unmatched). ~7,430 villages.",
+            "Village reference with LGD code matching status. ~7,430 villages across 47 blocks. Exact-matched villages get GPS from villages_point; unmatched ones fall back to block centroid.",
         "master_health_facilities":
-            "Health facility reference: PHCs, Sub-centres, and Other Public Facilities. ~1,799 facilities.",
+            "Health facility reference covering PHCs, Sub-centres, and Other Public Facilities across Meghalaya. ~1,799 facilities. Enriched with GPS from the health_facilities infrastructure table.",
         "geo_full_mapping":
-            "Complete geographic hierarchy: district → block → facility → village with LGD match confidence.",
+            "Complete geographic hierarchy: district → block → facility → village, with LGD match confidence for each village. Used to navigate from any level of the administrative hierarchy to any other.",
         "geo_match_report":
-            "Quality report for village-to-LGD matching (exact vs. unmatched).",
+            "Quality summary of village-to-LGD code matching: counts of exact matches vs. unmatched villages per block, used to assess geographic data completeness.",
         # Infrastructure
         "health_facilities":
-            "Health facility directory enriched with GPS coordinates (PostGIS POINT in 'geom'). ~646 facilities.",
+            "Health facility directory with GPS coordinates, facility type (PHC/Sub-centre/District Hospital), operational status, and administrative block/district codes. ~646 facilities.",
         "anganwadi_centres":
-            "ICDS Anganwadi Centre directory with GPS, infrastructure, and administrative data (~5,900 centres). PostGIS POINT in 'geom'.",
+            "ICDS Anganwadi Centre directory with GPS coordinates, infrastructure details (building type, water source, toilet availability), worker assignments, and administrative hierarchy. ~5,900 centres.",
         # Geography mapping
         "meghealth_geo_mapping":
-            "Facility-to-village mapping: district → block → PHC → sub-centre → village hierarchy used in Meghealth.",
+            "Meghealth application's internal geographic hierarchy: district → block → PHC → sub-centre → village. Used to map health service delivery areas to administrative boundaries.",
         # Health data
         "mother_journeys":
-            "Complete maternal journey from pregnancy registration through delivery and child outcome. ~363,898 records. PK: row_id (SERIAL). pregnancy_id is UNIQUE (NULLs allowed — some rows are child-only with no pregnancy registration). mother_id is non-unique (one row per pregnancy).",
+            "Maternal journey records from pregnancy registration through delivery and child outcome. Each row is one pregnancy — mothers with multiple pregnancies have multiple rows. Covers registration details, ANC visit summaries, delivery outcomes, and child birth data. ~363,898 records.",
         "anc_visits":
-            "Antenatal Care (ANC) visit records with clinical vitals (weight, BP, Hb), medications, and danger signs. ~361,551 records. PK: anc_id, FK: mother_id → mother_journeys.",
+            "Individual Antenatal Care (ANC) visit records with clinical vitals (weight, blood pressure, haemoglobin), medications administered (IFA, TT, calcium), danger sign assessments, and high-risk flags. ~361,551 visits.",
         "village_indicators_monthly":
-            "Monthly aggregated maternal and child health indicators at village level. ~133,071 records.",
+            "Monthly aggregated maternal and child health indicators at village level — registration counts, ANC coverage rates, institutional delivery percentages, immunization counts, and nutritional status metrics. ~133,071 records.",
         # Raw records
         "raw_anc_records":
-            "Raw API response records for ANC visits — normalized relational table. All original API fields preserved. ~361,508 records.",
+            "Unprocessed Meghealth API responses for ANC visits with all original fields preserved as individual columns. Use anc_visits for the cleaned/structured version. ~361,508 records.",
         "raw_child_records":
-            "Raw API response records for child/infant data — normalized relational table. ~192 MB source.",
+            "Unprocessed Meghealth API responses for child/infant tracking with all original fields preserved. Includes birth details, immunization records, and growth monitoring data.",
         "raw_pregnancy_records":
-            "Raw API response records for pregnancy journeys — normalized relational table. ~394 MB source. pregnancy_id FK → mother_journeys.",
+            "Unprocessed Meghealth API responses for pregnancy journeys with all original fields preserved. Includes registration, ANC summary, delivery, and outcome data.",
         # Reference JSON
         "nfhs_indicators":
-            "National Family Health Survey (NFHS) rounds 3/4/5 district-level health indicators. 624 records.",
+            "National Family Health Survey (NFHS) rounds 3, 4, and 5 district-level indicators for Meghalaya — covering nutrition, immunization, maternal health, family planning, and child mortality. 624 records across all districts and rounds.",
         "video_library":
-            "Educational video metadata for ASHA/ANM health workers (breastfeeding, nutrition, immunization etc). ~49 videos.",
+            "Educational video catalogue for ASHA and ANM health workers. Topics include breastfeeding, complementary feeding, immunization schedules, maternal nutrition, and newborn care. ~49 videos with duration and category metadata.",
         "research_articles":
-            "Peer-reviewed research articles on maternal and child health in Meghalaya/Northeast India. 23 articles.",
+            "Curated peer-reviewed research articles on maternal and child health in Meghalaya and Northeast India. 23 articles with titles, authors, abstracts, journal info, and publication years.",
     }
 
     col_comments = {
         "mother_journeys": {
-            "row_id":
-                "Surrogate primary key (SERIAL). Added during migration — pregnancy_id is nullable so cannot be the PK.",
             "mother_id":
-                "Meghealth mother identifier. Non-unique — a mother has one row per pregnancy. Indexed for cross-pregnancy lookups.",
+                "Meghealth mother identifier. Mothers with multiple pregnancies share the same mother_id across rows.",
             "pregnancy_id":
-                "Unique (NULLs allowed) composite ID, format: <mother_id>-<sno>. NULL for child-only records. FK target for raw_pregnancy_records.",
+                "Composite identifier (<mother_id>-<sno>). NULL for child-only records where no pregnancy was registered in Meghealth.",
             "gps_location":
-                "GPS location as WKT string (POINT lon lat). Convert to geometry with: ST_GeomFromText(gps_location, 4326).",
+                "GPS coordinates stored as WKT text (POINT lon lat). Convert with: ST_GeomFromText(gps_location, 4326).",
             "district":
-                "District name (free-text, not normalized). Join to master_districts for LGD codes.",
+                "District name as free-text (not LGD-normalized). Use master_districts for standardized codes.",
             "high_risk_at_registration":
-                "Boolean flag for high-risk pregnancy at time of registration.",
+                "Whether the pregnancy was flagged as high-risk at the time of initial registration.",
         },
         "anc_visits": {
-            "anc_id":    "Unique ANC visit identifier. Primary key.",
-            "mother_id": "Join key to mother_journeys.mother_id (indexed; no FK constraint because mother_id is non-unique in mother_journeys).",
-            "visit_date":"Date of ANC visit. Indexed for time-series queries.",
+            "anc_id":    "Unique ANC visit identifier assigned by the Meghealth system.",
+            "mother_id": "Mother identifier linking this visit to the corresponding records in mother_journeys.",
+            "visit_date": "Date when the ANC visit was conducted.",
         },
         "states": {
-            "id":            "Primary key (renamed from objectid). GIS feature identifier from source GeoJSON.",
-            "lgd_statecode": "LGD state census code. UNIQUE — FK target for districts.lgd_statecode.",
-            "geometry":      "PostGIS MULTIPOLYGON (EPSG:4326). State boundary.",
+            "id":            "GIS feature identifier (renamed from objectid in source GeoJSON).",
+            "lgd_statecode": "LGD (Local Government Directory) state census code.",
         },
         "districts": {
-            "id":               "Primary key (renamed from objectid). GIS feature identifier.",
-            "lgd_districtcode": "LGD district census code. UNIQUE (1 NULL allowed). FK target for subdistricts and villages.",
-            "lgd_statecode":    "LGD state code. FK → states.lgd_statecode.",
-            "geometry":         "PostGIS MULTIPOLYGON (EPSG:4326). District boundary.",
+            "id":               "GIS feature identifier (renamed from objectid in source GeoJSON).",
+            "lgd_districtcode": "LGD district census code. One district has NULL (no LGD assignment).",
+            "lgd_statecode":    "LGD code of the parent state.",
         },
         "district_boundaries": {
-            "id":      "Primary key (renamed from objectid_1). GIS feature identifier.",
-            "geometry":"PostGIS MULTIPOLYGON (EPSG:4326). District boundary (2021 delineation).",
+            "id": "GIS feature identifier (renamed from objectid_1 in source GeoJSON).",
         },
         "subdistricts": {
-            "id":                  "Primary key (renamed from objectid). GIS feature identifier.",
-            "lgd_subdistrictcode": "LGD subdistrict (block) census code. UNIQUE. FK target for villages.",
-            "lgd_districtcode":    "LGD district code. FK → districts.lgd_districtcode.",
-            "geometry":            "PostGIS MULTIPOLYGON (EPSG:4326). Subdistrict boundary.",
+            "id":                  "GIS feature identifier (renamed from objectid in source GeoJSON).",
+            "lgd_subdistrictcode": "LGD sub-district (C&RD block) census code.",
+            "lgd_districtcode":    "LGD code of the parent district.",
         },
         "blocks": {
-            "id":      "Primary key (renamed from objectid). GIS feature identifier.",
-            "district":"District name (free-text). No LGD code in source — join to districts by name.",
-            "geometry":"PostGIS MULTIPOLYGON (EPSG:4326). Block boundary.",
+            "id":       "GIS feature identifier (renamed from objectid in source GeoJSON).",
+            "district": "District name as free-text. No LGD code in source — link to districts by name.",
         },
         "villages_poly": {
-            "gid":                 "Surrogate primary key (SERIAL). objectid from source is non-unique so a new PK is generated.",
-            "id":                  "Original objectid from GeoJSON (non-unique, kept for reference only).",
-            "lgd_villagecode":     "LGD village census code. Nullable (95 unmatched villages have NULL). No UNIQUE constraint.",
-            "lgd_subdistrictcode": "LGD subdistrict code. FK → subdistricts.lgd_subdistrictcode.",
-            "lgd_districtcode":    "LGD district code. FK → districts.lgd_districtcode.",
-            "geometry":            "PostGIS POLYGON (EPSG:4326). Village boundary polygon.",
+            "gid":                 "Auto-generated row identifier (source objectid has duplicates).",
+            "id":                  "Original objectid from GeoJSON (non-unique, kept for reference).",
+            "lgd_villagecode":     "LGD village census code. NULL for ~95 villages that could not be matched to an LGD entry.",
+            "lgd_subdistrictcode": "LGD code of the parent sub-district.",
+            "lgd_districtcode":    "LGD code of the parent district.",
         },
         "villages_point": {
-            "gid":                 "Surrogate primary key (SERIAL). objectid from source is non-unique so a new PK is generated.",
-            "id":                  "Original objectid from GeoJSON (non-unique, kept for reference only).",
-            "lgd_villagecode":     "LGD village census code. Nullable (91 unmatched villages have NULL). No UNIQUE constraint.",
-            "lgd_subdistrictcode": "LGD subdistrict code. FK → subdistricts.lgd_subdistrictcode.",
-            "lgd_districtcode":    "LGD district code. FK → districts.lgd_districtcode.",
-            "geometry":            "PostGIS POINT (EPSG:4326). Village representative GPS point.",
+            "gid":                 "Auto-generated row identifier (source objectid has duplicates).",
+            "id":                  "Original objectid from GeoJSON (non-unique, kept for reference).",
+            "lgd_villagecode":     "LGD village census code. NULL for ~91 villages that could not be matched to an LGD entry.",
+            "lgd_subdistrictcode": "LGD code of the parent sub-district.",
+            "lgd_districtcode":    "LGD code of the parent district.",
         },
         "health_facilities": {
-            "geom":      "PostGIS POINT (EPSG:4326). Facility GPS location.",
-            "facility_id":"Unique facility identifier. Matches master_health_facilities.facility_id.",
+            "facility_id": "Unique facility identifier, matches the master_health_facilities reference table.",
         },
         "anganwadi_centres": {
-            "geom":               "PostGIS POINT (EPSG:4326). Centre GPS location.",
-            "anganwadi_centre_id":"Unique centre identifier.",
-            "geometry_x":         "Longitude (same as 'longitude' column, kept for source compatibility).",
-            "geometry_y":         "Latitude (same as 'latitude' column, kept for source compatibility).",
+            "anganwadi_centre_id": "Unique Anganwadi centre identifier.",
+            "geometry_x":         "Longitude (duplicate of longitude column, kept for source compatibility).",
+            "geometry_y":         "Latitude (duplicate of latitude column, kept for source compatibility).",
         },
         "raw_anc_records": {
-            "row_id":    "Surrogate primary key (SERIAL). Added during migration.",
-            "mother_id": "Extracted from JSON for indexing. FK → mother_journeys.mother_id.",
+            "mother_id": "Mother identifier extracted from the raw JSON for cross-referencing with mother_journeys.",
         },
         "raw_child_records": {
-            "row_id":    "Surrogate primary key (SERIAL). Added during migration.",
-            "mother_id": "Extracted from JSON for indexing. FK → mother_journeys.mother_id.",
+            "mother_id": "Mother identifier extracted from the raw JSON for cross-referencing with mother_journeys.",
         },
         "raw_pregnancy_records": {
-            "row_id":       "Surrogate primary key (SERIAL). Added during migration.",
-            "mother_id":    "Extracted from JSON for indexing.",
-            "pregnancy_id": "Pregnancy ID in format <mother_id>-<sno>. FK → mother_journeys.pregnancy_id.",
+            "mother_id":    "Mother identifier extracted from the raw JSON.",
+            "pregnancy_id": "Pregnancy identifier (<mother_id>-<sno>), linking to the corresponding mother_journeys record.",
         },
         "master_districts": {
-            "district_code_lgd": "Primary key — LGD district code. FK → districts.lgd_districtcode.",
-            "geom":              "Centroid of the district polygon (from districts.geometry). EPSG:4326 POINT.",
+            "district_code_lgd": "LGD district code — the canonical identifier for this district.",
+            "geom":              "Centroid derived from the corresponding district boundary polygon.",
         },
         "master_blocks": {
-            "block_code_lgd":    "Primary key — LGD block code.",
-            "district_code_lgd": "FK → master_districts.district_code_lgd and districts.lgd_districtcode.",
-            "geom":              "Centroid of the matching subdistrict polygon (joined by block name + district LGD code). EPSG:4326 POINT.",
+            "block_code_lgd":    "LGD block code — the canonical identifier for this block.",
+            "district_code_lgd": "LGD code of the parent district.",
+            "geom":              "Centroid derived from the matching sub-district polygon (matched by block name and district code).",
         },
         "master_villages": {
-            "village_id":       "Primary key, format: 'V-NNNNN'.",
-            "village_code_lgd": "LGD village census code (NULL if unmatched). Soft join → villages_point.lgd_villagecode.",
-            "match_confidence": "LGD matching quality: 'exact' or 'unmatched'.",
-            "geom":             "EPSG:4326 POINT. Exact match: from villages_point via lgd_villagecode. Unmatched: block centroid fallback.",
+            "village_id":       "Village identifier in format V-NNNNN.",
+            "village_code_lgd": "LGD village census code. NULL if the village could not be matched to any LGD entry.",
+            "match_confidence": "LGD matching quality: 'exact' for confirmed matches, 'unmatched' for villages without LGD correspondence.",
+            "geom":             "GPS point from villages_point for exact matches; block centroid fallback for unmatched villages.",
         },
         "master_health_facilities": {
-            "facility_id":       "Primary key — unique facility identifier. FK target from master_villages.",
-            "block_code_lgd":    "FK → master_blocks.block_code_lgd.",
-            "district_code_lgd": "FK → master_districts.district_code_lgd and districts.lgd_districtcode.",
-            "geom":              "GPS point from health_facilities.geom (matched via facility_id). EPSG:4326 POINT.",
+            "facility_id":       "Unique facility identifier.",
+            "block_code_lgd":    "LGD code of the block where this facility is located.",
+            "district_code_lgd": "LGD code of the district where this facility is located.",
+            "geom":              "GPS point sourced from the health_facilities infrastructure table.",
         },
         "nfhs_indicators": {
-            "nfhs_round":   "NFHS survey round (3, 4, or 5).",
-            "survey_year":  "Survey year range (e.g. '2019-21').",
-            "district":     "District or state name from NFHS report.",
-            "total":        "Total (combined rural+urban) indicator value.",
+            "nfhs_round":   "NFHS survey round number (3, 4, or 5).",
+            "survey_year":  "Survey year range as reported (e.g., '2019-21').",
+            "district":     "District or state name as it appears in the NFHS survey report.",
+            "total":        "Combined rural and urban indicator value.",
         },
     }
 
