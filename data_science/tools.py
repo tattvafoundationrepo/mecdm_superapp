@@ -20,7 +20,7 @@ import logging
 from google.adk.tools import ToolContext
 from google.adk.tools.agent_tool import AgentTool
 
-from .sub_agents import alloydb_agent, analytics_agent
+from .sub_agents import alloydb_agent
 from .sub_agents.alloydb.tools import get_toolbox_client
 from .utils.map_utils import (
     FACILITY_QUERY,
@@ -109,6 +109,8 @@ async def call_analytics_agent(
   IMPORTANT: Return your computed results as JSON data arrays using print(json.dumps(...)).
   Do NOT generate matplotlib plots or images. The frontend will render charts from your JSON data.
   """
+
+    from .sub_agents import analytics_agent
 
     agent_tool = AgentTool(agent=analytics_agent)
 

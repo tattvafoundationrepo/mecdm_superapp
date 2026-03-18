@@ -21,7 +21,8 @@ from google.adk.cli.fast_api import get_fast_api_app
 from google.cloud import logging as google_cloud_logging
 
 from data_science.app_utils.telemetry import setup_telemetry
-from data_science.app_utils.typing import Feedback
+from data_science.routers.chat import router as chat_router
+from data_science.routers.feedback import router as feedback_router
 
 setup_telemetry()
 _, project_id = google.auth.default()
@@ -43,19 +44,21 @@ db_pass = os.environ.get("DB_PASS")
 instance_connection_name = os.environ.get("INSTANCE_CONNECTION_NAME")
 
 session_service_uri = None
-if instance_connection_name and db_pass:
-    # Use Unix socket for Cloud SQL
-    # URL-encode username and password to handle special characters (e.g., '[', '?', '#', '$')
-    # These characters can cause URL parsing errors, especially '[' which triggers IPv6 validation
+
+# Prefer DATABASE_URL_USER (direct TCP — works locally and in production)
+# Note: ADK's DatabaseSessionService uses synchronous create_engine (psycopg2),
+# so we pass the postgresql:// URL as-is — do NOT convert to asyncpg.
+db_url_user = os.environ.get("DATABASE_URL_USER")
+if db_url_user:
+    session_service_uri = db_url_user
+elif instance_connection_name and db_pass:
+    # Fallback: Cloud SQL Unix socket (only works on Cloud Run with proxy)
     encoded_user = quote(db_user, safe="")
     encoded_pass = quote(db_pass, safe="")
-    # URL-encode the connection name to prevent colons from being misinterpreted
-    encoded_instance = instance_connection_name.replace(":", "%3A")
-
     session_service_uri = (
-        f"postgresql+asyncpg://{encoded_user}:{encoded_pass}@"
+        f"postgresql://{encoded_user}:{encoded_pass}@"
         f"/{db_name}"
-        f"?host=/cloudsql/{encoded_instance}"
+        f"?host=/cloudsql/{instance_connection_name}"
     )
 
 artifact_service_uri = f"gs://{logs_bucket_name}" if logs_bucket_name else None
@@ -71,19 +74,9 @@ app: FastAPI = get_fast_api_app(
 app.title = "mecdm-super-agent"
 app.description = "API for interacting with the Agent mecdm-super-agent"
 
-
-@app.post("/feedback")
-def collect_feedback(feedback: Feedback) -> dict[str, str]:
-    """Collect and log feedback.
-
-    Args:
-        feedback: The feedback data to log
-
-    Returns:
-        Success message
-    """
-    logger.log_struct(feedback.model_dump(), severity="INFO")
-    return {"status": "success"}
+# Mount chat and feedback routers
+app.include_router(chat_router)
+app.include_router(feedback_router)
 
 
 # Main execution

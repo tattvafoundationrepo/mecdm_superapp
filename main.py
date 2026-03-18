@@ -40,7 +40,12 @@ logger = logging_client.logger(__name__)
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Get session service URI from environment variables
-session_uri = os.getenv("SESSION_SERVICE_URI", None)
+# Prefer explicit SESSION_SERVICE_URI, fall back to DATABASE_URL_USER
+# Note: ADK's DatabaseSessionService uses synchronous create_engine (psycopg2),
+# so we pass the postgresql:// URL as-is — do NOT convert to asyncpg.
+session_uri = os.getenv("SESSION_SERVICE_URI")
+if not session_uri:
+    session_uri = os.getenv("DATABASE_URL_USER")
 
 # Get Enable Web interface serving flag from environment variables
 # Set web=True if you intend to serve a web interface, False otherwise
@@ -57,7 +62,8 @@ if session_uri:
     app_args["session_service_uri"] = session_uri
 else:
     logger.log_text(
-        "SESSION_SERVICE_URI not provided. Using in-memory session service instead. "
+        "SESSION_SERVICE_URI and DATABASE_URL_USER not provided. "
+        "Using in-memory session service instead. "
         "All sessions will be lost when the server restarts.",
         severity="WARNING",
     )
@@ -67,6 +73,13 @@ app: FastAPI = get_fast_api_app(**app_args)
 
 app.title = "data_science"
 app.description = "Data Science Agent"
+
+# Mount chat and feedback routers
+from data_science.routers.chat import router as chat_router
+from data_science.routers.feedback import router as feedback_router
+
+app.include_router(chat_router)
+app.include_router(feedback_router)
 
 if __name__ == "__main__":
     # Use the PORT environment variable provided by Cloud Run, defaulting to 8080

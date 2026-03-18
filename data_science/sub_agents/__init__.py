@@ -13,4 +13,7 @@
 # limitations under the License.
 
 from .alloydb.agent import alloydb_agent
-from .analytics.agent import analytics_agent
+
+# analytics_agent is imported lazily (in tools.py → call_analytics_agent)
+# because VertexAiCodeExecutor connects to a Vertex AI Extension at import time,
+# which fails locally when the extension doesn't exist.
