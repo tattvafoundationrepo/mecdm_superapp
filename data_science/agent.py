@@ -42,6 +42,8 @@ from .tools import (
     generate_map_viz,
     get_current_datetime,
     get_historical_weather_data,
+    get_predefined_stats_catalog,
+    get_stats_schema_summary,
     get_weather_data,
     search_policy_rag_engine,
 )
@@ -154,6 +156,8 @@ def get_root_agent() -> LlmAgent:
         get_historical_weather_data,
         export_data_to_csv,
         search_policy_rag_engine,
+        get_stats_schema_summary,
+        get_predefined_stats_catalog,
         google_search,
     ]
     sub_agents = []

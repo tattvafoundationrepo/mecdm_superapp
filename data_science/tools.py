@@ -565,6 +565,133 @@ async def find_nearest_facilities(
     return result_text
 
 
+STATS_ALLOWLISTED_TABLES = [
+    "village_indicators_monthly",
+    "mother_journeys",
+    "anc_visits",
+    "master_districts",
+    "master_blocks",
+    "master_health_facilities",
+    "anganwadi_centres",
+    "nfhs_indicators",
+]
+
+PREDEFINED_STATS_CATALOG = [
+    {"id": "total-registrations", "name": "Total Registrations", "category": "maternal-health", "description": "Total maternal registrations across all districts"},
+    {"id": "institutional-delivery-rate", "name": "Institutional Delivery Rate", "category": "maternal-health", "description": "Percentage of deliveries at health institutions"},
+    {"id": "health-facilities-count", "name": "Health Facilities", "category": "infrastructure", "description": "Total health facilities across all districts"},
+    {"id": "awc-count", "name": "Anganwadi Centres", "category": "infrastructure", "description": "Total Anganwadi centres across all districts"},
+    {"id": "district-registrations", "name": "District-wise Registrations", "category": "maternal-health", "description": "Total maternal registrations by district (bar chart)"},
+    {"id": "monthly-registrations-trend", "name": "Monthly Registration & Delivery Trends", "category": "maternal-health", "description": "Monthly trends of registrations and deliveries (area chart)"},
+    {"id": "facility-type-distribution", "name": "Facility Type Distribution", "category": "infrastructure", "description": "Health facility count by type (pie chart)"},
+    {"id": "block-delivery-rate", "name": "Top 20 Blocks: Institutional Deliveries", "category": "maternal-health", "description": "Blocks with highest institutional deliveries (bar chart)"},
+    {"id": "maternal-deaths-district", "name": "Maternal Deaths by District", "category": "maternal-health", "description": "Total reported maternal deaths by district (bar chart)"},
+    {"id": "monthly-anc-coverage", "name": "Monthly ANC Coverage", "category": "maternal-health", "description": "Monthly ANC visits, IFA recipients, and TT doses (line chart)"},
+]
+
+_NUMERIC_TYPES = {"bigint", "integer", "smallint", "numeric", "double precision", "real"}
+_META_COLUMNS = {"created_at", "updated_at", "objectid", "geom", "geometry"}
+_GEOMETRY_TYPES = {"geometry", "geography", "USER-DEFINED"}
+
+
+def _infer_column_role(col_name: str, data_type: str) -> str | None:
+    """Infer the stats role for a column. Returns None if the column should be skipped."""
+    name_lower = col_name.lower()
+    type_lower = data_type.lower()
+
+    if name_lower in _META_COLUMNS or type_lower in _GEOMETRY_TYPES:
+        return None  # skip
+    if name_lower.endswith(("_id", "_code", "_code_lgd")):
+        return "identifier"
+    if name_lower in ("year_month",) or name_lower.endswith("_date"):
+        return "timestamp"
+    if type_lower in _NUMERIC_TYPES:
+        return "measure"
+    return "dimension"
+
+
+async def get_stats_schema_summary(tool_context: ToolContext) -> str:
+    """Returns a summary of queryable tables and their columns for generating StatQuery objects.
+
+    Use this tool when you need to construct a mecdm_stat block. It returns the available
+    tables, their columns (with data types and roles like dimension/measure/timestamp),
+    and which tables are eligible for the Stats API.
+
+    Returns:
+        JSON string with table schemas in StatQuery-compatible format.
+    """
+    try:
+        list_tables_tool = get_toolbox_client().load_tool("list_tables")
+        table_names = ",".join(STATS_ALLOWLISTED_TABLES)
+        raw_schema = list_tables_tool(schema_names="public", table_names=table_names)
+
+        # Parse the raw schema output into a structured format
+        # The list_tables tool returns JSON with table details
+        if isinstance(raw_schema, str):
+            import json as _json
+            try:
+                tables_data = _json.loads(raw_schema)
+            except _json.JSONDecodeError:
+                # Raw text output — return it with instructions
+                return f"Stats-eligible tables: {table_names}\n\nRaw schema:\n{raw_schema[:4000]}"
+        else:
+            tables_data = raw_schema
+
+        # Build condensed schema summary
+        summary = {}
+        if isinstance(tables_data, list):
+            for table_info in tables_data:
+                tname = table_info.get("table_name") or table_info.get("name", "")
+                if tname not in STATS_ALLOWLISTED_TABLES:
+                    continue
+                columns = []
+                for col in table_info.get("columns", []):
+                    col_name = col.get("column_name") or col.get("name", "")
+                    col_type = col.get("data_type") or col.get("type", "")
+                    role = _infer_column_role(col_name, col_type)
+                    if role:
+                        columns.append({"name": col_name, "type": col_type, "role": role})
+                if columns:
+                    summary[tname] = {"columns": columns}
+        elif isinstance(tables_data, dict):
+            # Handle dict format where keys are table names
+            for tname, tinfo in tables_data.items():
+                if tname not in STATS_ALLOWLISTED_TABLES:
+                    continue
+                columns = []
+                for col in (tinfo.get("columns", []) if isinstance(tinfo, dict) else []):
+                    col_name = col.get("column_name") or col.get("name", "")
+                    col_type = col.get("data_type") or col.get("type", "")
+                    role = _infer_column_role(col_name, col_type)
+                    if role:
+                        columns.append({"name": col_name, "type": col_type, "role": role})
+                if columns:
+                    summary[tname] = {"columns": columns}
+
+        if not summary:
+            # Fallback: return table names and raw output
+            return f"Stats-eligible tables: {table_names}\n\nSchema data format not recognized. Raw:\n{str(tables_data)[:3000]}"
+
+        return json.dumps(summary, indent=2)
+
+    except Exception as e:
+        logger.error("get_stats_schema_summary failed: %s", e)
+        return f"Error fetching stats schema: {e}"
+
+
+async def get_predefined_stats_catalog(tool_context: ToolContext) -> str:
+    """Returns the catalog of predefined statistics available in the dashboard.
+
+    Use this when a user asks about available stats, KPIs, or dashboard metrics, or
+    when the user's question matches a predefined stat. You can reference these by ID
+    in a mecdm_stat block using {"predefined_id": "<id>"} instead of building a new query.
+
+    Returns:
+        JSON string listing predefined stat IDs, names, descriptions, and categories.
+    """
+    return json.dumps(PREDEFINED_STATS_CATALOG, indent=2)
+
+
 async def search_policy_rag_engine(query: str, tool_context: ToolContext) -> str:
     """Searches the Meghalaya Government Policy Intelligence Engine (Vertex AI RAG API) for policy details.
 
