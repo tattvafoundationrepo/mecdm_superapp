@@ -16,7 +16,6 @@
 
 import logging
 import os
-import re
 
 from google.adk.tools import ToolContext
 from google.genai import Client
@@ -118,6 +117,47 @@ def update_database_settings():
     return database_settings
 
 
+def _fetch_golden_examples() -> str:
+    """Fetch golden SQL examples directly from the shared user DB."""
+    import asyncio
+
+    try:
+        from sqlalchemy import select
+
+        from data_science.app_utils.models import GoldenSql
+        from data_science.app_utils.user_db import get_session_factory
+
+        factory = get_session_factory()
+        if factory is None:
+            logger.warning("User DB not configured, skipping golden SQL examples")
+            return ""
+
+        async def _query():
+            async with factory() as session:
+                result = await session.execute(
+                    select(GoldenSql).where(GoldenSql.is_active == True).limit(15)  # noqa: E712
+                )
+                return result.scalars().all()
+
+        rows = asyncio.run(_query())
+
+        if not rows:
+            return ""
+
+        lines = []
+        for row in rows:
+            lines.append(f"Q: {row.question}")
+            lines.append(f"SQL: {row.sql_query}")
+            if row.explanation:
+                lines.append(f"-- {row.explanation}")
+            lines.append("")
+        return "\n".join(lines)
+
+    except Exception as e:
+        logger.warning("Failed to fetch golden SQL examples: %s", e)
+        return ""
+
+
 def alloydb_nl2sql(
     question: str,
     tool_context: ToolContext,
@@ -142,7 +182,10 @@ Rules:
 - Minimize joins. Ensure matching data types on join columns.
 - Include all non-aggregated SELECT columns in GROUP BY.
 - Apply WHERE/HAVING filters to minimize returned rows.
-
+- In mother_journeys and anc_visits, ALL columns are TEXT type — cast to numeric/date as needed.
+- District names in mother_journeys/anc_visits are UPPERCASE (e.g., 'EAST KHASI HILLS').
+- Use integer code joins (district_code_lgd, block_code_lgd) instead of name joins when possible.
+{EXAMPLES_SECTION}
 Schema:
 ```
 {SCHEMA}
@@ -155,10 +198,21 @@ Generate the PostgreSQL query.
 
     schema = tool_context.state["database_settings"]["alloydb"]["schema"]
 
+    # Fetch golden SQL examples for few-shot learning
+    golden_examples = _fetch_golden_examples()
+    examples_section = ""
+    if golden_examples:
+        examples_section = f"""
+Example Queries (verified correct — follow these patterns):
+```
+{golden_examples}
+```
+"""
+
     prompt = prompt_template.format(
-        #        MAX_NUM_ROWS=MAX_NUM_ROWS,
         SCHEMA=schema,
         QUESTION=question,
+        EXAMPLES_SECTION=examples_section,
     )
 
     response = llm_client.models.generate_content(
@@ -246,14 +300,12 @@ def run_alloydb_query(
 
     final_result = {"query_result": "", "error_message": ""}
 
-    # Disallow DML and DDL
-    if re.search(
-        r"(?i)(update|delete|drop|insert|create|alter|truncate|merge)",
-        sql_string,
-    ):
-        final_result["error_message"] = (
-            "Invalid SQL: Contains disallowed DML/DDL operations."
-        )
+    # Validate SQL using pglast (PostgreSQL's actual C parser)
+    from data_science.app_utils.sql_validator import validate_sql
+
+    is_safe, reason = validate_sql(sql_string)
+    if not is_safe:
+        final_result["error_message"] = f"Blocked: {reason}"
         return final_result
 
     try:
