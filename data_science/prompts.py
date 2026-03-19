@@ -58,43 +58,22 @@ Use chart for trends/comparisons, stat_cards for 2-6 KPIs, table for detailed re
 STATS SYSTEM (use fenced ```mecdm_stat``` code blocks):
 
 For structured data aggregations (district summaries, monthly trends, KPI metrics, facility counts),
-generate a mecdm_stat block. The frontend will execute the query and render an interactive, saveable chart.
-
-Format — custom query:
-```mecdm_stat
-{
-  "query": {
-    "source": {"table": "village_indicators_monthly"},
-    "dimensions": [{"column": "district_name", "alias": "district"}],
-    "measures": [{"column": "total_registrations", "aggregate": "sum", "alias": "registrations"}],
-    "filters": [],
-    "orderBy": [{"column": "registrations", "direction": "desc"}],
-    "limit": 1000
-  },
-  "chart": {
-    "type": "bar",
-    "mapping": {"xAxis": "district", "yAxis": "registrations"},
-    "options": {"title": "District-wise Registrations", "showGrid": true}
-  },
-  "name": "District-wise Registrations",
-  "description": "Total maternal registrations by district"
-}
-```
-
-Format — predefined stat reference (preferred when a predefined stat answers the question):
-```mecdm_stat
-{"predefined_id": "district-registrations"}
-```
+generate a mecdm_stat block with a full StatQuery. The frontend executes the query and renders an interactive, saveable chart.
+Always build the complete query+chart JSON — never use predefined_id references.
 
 When to use mecdm_stat vs mecdm_viz:
 - mecdm_stat: structured aggregations from the 8 stats-eligible tables, queries users might save, KPIs, trends, comparisons.
 - mecdm_viz: maps (always use generate_map_viz), one-off inline data, stat_cards with pre-computed values, tables with specific data.
 - You can use BOTH in one response.
 
-Before generating a mecdm_stat block:
-1. Call `get_predefined_stats_catalog` first — if a predefined stat matches, use {"predefined_id": "..."}.
-2. If no predefined stat matches, call `get_stats_schema_summary` to discover tables and columns.
-3. Only reference tables and columns that exist in the schema summary.
+village_indicators_monthly columns (primary table for MCH stats):
+  Dimensions: district_name, block_name, village_name, year_month (TEXT "YYYY-MM")
+  Join keys: district_code_lgd, block_code_lgd (BIGINT)
+  Measures: total_registrations, reg_1st_trimester, total_deliveries, institutional_deliveries,
+    home_del_sba, home_del_not_sba, high_risk_registrations, high_risk_deliveries,
+    maternal_deaths, total_anc_visits, ifa_recipients, tt_doses, mothers_counselled,
+    infant_deaths, neonatal_deaths
+For other tables, call `get_stats_schema_summary` to discover columns.
 
 StatQuery rules:
 - source.table: one of the 8 allowlisted tables (village_indicators_monthly, mother_journeys, anc_visits, master_districts, master_blocks, master_health_facilities, anganwadi_centres, nfhs_indicators)
@@ -107,6 +86,21 @@ StatQuery rules:
 - chart.type: bar, line, area, pie, donut, kpi_card, stacked_bar, grouped_bar, table
 - chart.mapping: {xAxis, yAxis (string or string[]), value (for kpi_card), label (for pie), groupBy}
 - chart.options: {title, subtitle, showGrid, showLegend, colors[], orientation ("horizontal" for horizontal bars), numberFormat, icon}
+
+Example — KPI card (single aggregate):
+```mecdm_stat
+{"query":{"source":{"table":"village_indicators_monthly"},"dimensions":[],"measures":[{"column":"total_registrations","aggregate":"sum","alias":"value"}]},"chart":{"type":"kpi_card","mapping":{"value":"value"},"options":{"title":"Total Registrations","icon":"baby","numberFormat":"0,0"}},"name":"Total Registrations","description":"Total maternal registrations across all districts"}
+```
+
+Example — bar chart (district breakdown):
+```mecdm_stat
+{"query":{"source":{"table":"village_indicators_monthly"},"dimensions":[{"column":"district_name","alias":"district"}],"measures":[{"column":"maternal_deaths","aggregate":"sum","alias":"deaths"}],"orderBy":[{"column":"deaths","direction":"desc"}]},"chart":{"type":"bar","mapping":{"xAxis":"district","yAxis":"deaths"},"options":{"title":"Maternal Deaths by District","showGrid":true}},"name":"Maternal Deaths by District","description":"Total reported maternal deaths by district"}
+```
+
+Example — trend chart (monthly time series):
+```mecdm_stat
+{"query":{"source":{"table":"village_indicators_monthly"},"dimensions":[{"column":"year_month","alias":"month"}],"measures":[{"column":"total_registrations","aggregate":"sum","alias":"registrations"},{"column":"institutional_deliveries","aggregate":"sum","alias":"inst_deliveries"}],"orderBy":[{"column":"month","direction":"asc"}],"timeRange":{"column":"year_month","preset":"last_year"}},"chart":{"type":"area","mapping":{"xAxis":"month","yAxis":["registrations","inst_deliveries"]},"options":{"title":"Monthly Trends: Registrations & Deliveries","showGrid":true,"showLegend":true}},"name":"Monthly Trends","description":"Monthly trends of registrations and deliveries"}
+```
 
 MAP GENERATION (two-step workflow using `generate_map_viz`):
 Use `generate_map_viz` for any geographic or spatial visualization. Do NOT manually construct map mecdm_viz blocks — the tool handles geometry joining and GeoJSON construction automatically.
