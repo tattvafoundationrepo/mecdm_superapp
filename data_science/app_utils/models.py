@@ -3,6 +3,8 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -14,7 +16,7 @@ from sqlalchemy import (
 # Note: ForeignKey("user.id") is NOT declared in the ORM models because the
 # BetterAuth "user" table has no SQLAlchemy model in this codebase.
 # The FK constraints exist in the actual database (created by migration SQL).
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -94,6 +96,73 @@ class UserPreferences(Base):
     user_id: Mapped[str] = mapped_column(Text, primary_key=True)
     chat_position: Mapped[str] = mapped_column(
         Text, nullable=False, default="dock-right"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+        server_default=func.now(),
+    )
+
+
+# ── Dashboard config tables ──────────────────────────────────────────────────
+
+
+class DashboardStat(Base):
+    __tablename__ = "dashboard_stat"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    query: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    chart: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    refresh_interval: Mapped[int | None] = mapped_column(Integer)
+    is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+        server_default=func.now(),
+    )
+
+
+class GeographyDashboardConfig(Base):
+    __tablename__ = "geography_dashboard_config"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    geo_level: Mapped[str] = mapped_column(Text, nullable=False)
+    district_code_lgd: Mapped[int | None] = mapped_column(BigInteger)
+    block_code_lgd: Mapped[int | None] = mapped_column(BigInteger)
+    stat_ids: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    is_override: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    label: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        onupdate=_utcnow,
+        server_default=func.now(),
+    )
+
+
+class UserDashboardConfig(Base):
+    __tablename__ = "user_dashboard_config"
+
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    stat_ids: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+    hidden_stat_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list
+    )
+    extra_stat_ids: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), default=list
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
