@@ -119,27 +119,22 @@ def update_database_settings():
 
 def _fetch_golden_examples() -> str:
     """Fetch golden SQL examples directly from the shared user DB."""
-    import asyncio
-
     try:
-        from sqlalchemy import select
+        from sqlalchemy import create_engine, select
 
         from data_science.app_utils.models import GoldenSql
-        from data_science.app_utils.user_db import get_session_factory
 
-        factory = get_session_factory()
-        if factory is None:
-            logger.warning("User DB not configured, skipping golden SQL examples")
+        db_url = os.environ.get("DATABASE_URL_USER")
+        if not db_url:
+            logger.warning("DATABASE_URL_USER not set, skipping golden SQL examples")
             return ""
 
-        async def _query():
-            async with factory() as session:
-                result = await session.execute(
-                    select(GoldenSql).where(GoldenSql.is_active == True).limit(15)  # noqa: E712
-                )
-                return result.scalars().all()
-
-        rows = asyncio.run(_query())
+        engine = create_engine(db_url, pool_pre_ping=True)
+        with engine.connect() as conn:
+            result = conn.execute(
+                select(GoldenSql).where(GoldenSql.is_active == True).limit(15)  # noqa: E712
+            )
+            rows = result.all()
 
         if not rows:
             return ""
