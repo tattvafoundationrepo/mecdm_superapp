@@ -1,768 +1,309 @@
-# Data Science with Multiple Agents
+# MECDM SuperApp Backend
 
-## :star: :star: MAJOR UPDATE :star: :star:
+AI-powered health intelligence platform for maternal and child health (MCH) decision-making in Meghalaya, India. Built with **Google ADK**, **Vertex AI Gemini**, and **AlloyDB with PostGIS**.
 
-Note for previous users of the Data Science Agent: this newly released version
-of the Data Science Agent introduces some significant changes. Please read this
-document carefully.
+## What It Does
 
-### Significant Changes Introduced
+The backend powers a conversational AI agent that lets users query maternal-child health data using natural language. It translates questions into SQL, runs analytics, generates geographic visualizations, searches policy documents, and returns structured JSON for frontend rendering.
 
-1. *AlloyDB data source*: The updated agent includes support for a second data
-    source in AlloyDB, including an AlloyDB sub-agent.
-1. *MCP Toolbox for Databases*: The AlloyDB sub-agent uses the
-    [MCP Toolbox for Databases][mcp-toolbox] to connect to AlloyDB.
-1. *BigQuery Built-In Tools*: The BigQuery sub-agent now uses the
-    [ADK Built-in BigQuery Tool][adk-builtin-tool-bq] to connect to BigQuery.
-1. *New sample dataset*: The agent now includes a new sample dataset with simulated
-    flight and ticket information for a fictitional airline. The new dataset is
-    designed to be hosted in both AlloyDB and BigQuery, to demonstrate the
-    cross-dataset capabiliites of the agent.
-1. *Dataset configuration*: The agent uses a new configuration file format allowing
-    users to configure the data sources used at runtime, including using only
-    BigQuery or BigQuery and AlloyDB.
-1. *Cross-dataset joins*: The new configuration format also includes support for
-    specifying cross-dataset key relationships, allowing the agent to perform
-    cross-dataset joins.
+**Three user personas:**
+- **Government Officials** -- aggregate analytics, trend analysis, district comparisons
+- **Frontline Health Workers (ASHA/ANM)** -- beneficiary tracking, facility-level data
+- **Citizens** -- health awareness and service availability
 
+## Tech Stack
 
-## Overview
+| Layer | Technology |
+|---|---|
+| Framework | FastAPI + Google ADK (Agent Development Kit) |
+| LLM | Vertex AI Gemini 2.5 Pro (root), 2.5 Flash (sub-agents) |
+| Primary Database | AlloyDB with PostGIS (spatial queries) |
+| Database Access | MCP Toolbox for Databases (`toolbox-core`) |
+| User/Session DB | PostgreSQL with SQLAlchemy |
+| Policy Search | Vertex AI RAG Engine |
+| Code Execution | Vertex AI Code Executor |
+| Observability | OpenTelemetry, Google Cloud Logging |
+| Deployment | Google Cloud Run, Docker |
+| Package Manager | uv |
 
-This project demonstrates a multi-agent system designed for sophisticated data
-analysis. It integrates several specialized agents to handle different aspects
-of the data pipeline, from data retrieval to advanced analytics and machine
-learning. The system is built to interact with BigQuery and AlloyDB, perform complex data
-manipulations, generate data visualizations and execute machine learning tasks
-using BigQuery ML (BQML). The agent can generate text response as well as
-visuals, including plots and graphs for data analysis and exploration.
+## Architecture
 
-▶️ **Watch the Video Walkthrough:** [How to build a Data Science agent with
-ADK](https://www.youtube.com/watch?v=efcUXoMX818)
+```
+                         User Query (natural language)
+                                    |
+                              FastAPI Router
+                             (chat.py endpoints)
+                                    |
+                          ADK App / Root Agent
+                        (Gemini 2.5 Pro, temp=0.01)
+                                    |
+                 +------------------+------------------+
+                 |                  |                  |
+          AlloyDB Agent      Analytics Agent     Direct Tools
+          (NL2SQL)           (NL2Py)             (11 tools)
+                 |                  |
+          MCP Toolbox        Vertex AI Code
+          execute_sql        Executor
+                 |                  |
+            AlloyDB             Python sandbox
+         (PostGIS enabled)      (pandas, numpy, scipy)
+                                    |
+                          Structured JSON Response
+                       (mecdm_viz / mecdm_stat blocks)
+                                    |
+                            Frontend Rendering
+```
 
-## Agent Details
-The key features of the Data Science Multi-Agent include:
+### Agent Hierarchy
 
-| Feature | Description |
-| --- | --- |
-| **Interaction Type:** | Conversational |
-| **Complexity:**  | Advanced |
-| **Agent Type:**  | Multi Agent |
-| **Components:**  | Tools, AgentTools, Session Memory, RAG, MCP Toolkit for Databases, ADK Builtin BigQuery Tools |
-| **Vertical:**  | All (Applicable across industries needing advanced data analysis) |
+**Root Agent** orchestrates two specialized sub-agents via AgentTools:
 
+- **AlloyDB Agent** -- translates natural language to PostgreSQL, executes queries via MCP Toolbox, returns tabular results
+- **Analytics Agent** -- takes query results, generates Python code for statistical analysis, returns structured JSON output
 
-### Architecture
-![Data Science Architecture](data-science-architecture.svg)
+### Root Agent Tools (11)
 
-### Key Features
+| Tool | Purpose |
+|---|---|
+| `call_alloydb_agent` | Route data questions to the NL2SQL sub-agent |
+| `call_analytics_agent` | Route data for Python-based statistical analysis |
+| `generate_map_viz` | Create choropleth/bubble maps with PostGIS geometry joins |
+| `find_nearest_facilities` | Spatial distance queries (nearest PHC/SC/CHC/DH/AWC) |
+| `search_policy_rag_engine` | Search Meghalaya Government policy documents |
+| `get_stats_schema_summary` | List stats-eligible tables and columns |
+| `get_predefined_stats_catalog` | Return 10 predefined KPI templates |
+| `export_data_to_csv` | Export query results to CSV |
+| `get_current_datetime` | Current date/time for relative queries |
+| `get_weather_data` | Current weather via Open-Meteo API |
+| `get_historical_weather_data` | Historical weather trends |
 
-*   **Multi-Agent Architecture:** Utilizes a top-level agent that orchestrates
-    sub-agents, each specialized in a specific task.
-*   **Database Interaction (NL2SQL):** Employs a Database Agent to interact with
-    BigQuery and AlloyDB using natural language queries, translating them into SQL.
-*   **Data Science Analysis (NL2Py):** Includes a Data Science Agent that
-    performs data analysis and visualization using Python, based on natural
-    language instructions.
-*   **Machine Learning (BQML):** Features a BQML Agent that leverages BigQuery
-    ML for training and evaluating machine learning models.
-*   **Code Interpreter Integration:** Supports the use of a Code Interpreter
-    extension in Vertex AI for executing Python code, enabling complex data
-    analysis and manipulation.
-*   **ADK Web GUI:** Offers a user-friendly GUI interface for interacting with
-    the agents.
-*   **Testability:** Includes a comprehensive test suite for ensuring the
-    reliability of the agents.
+## Request Flow
 
+**Data retrieval example** ("Show ANC coverage by district"):
 
-## Agent Setup and Installation
+1. User sends natural language query via chat API
+2. FastAPI router passes to ADK App / Root Agent
+3. Root agent invokes `call_alloydb_agent` with the question
+4. AlloyDB agent calls `alloydb_nl2sql` (Gemini 2.5 Flash generates PostgreSQL from schema + golden examples)
+5. Agent calls `run_alloydb_query` (executes via MCP Toolbox `execute_sql`)
+6. Results stored in `tool_context.state["alloydb_query_result"]`
+7. Root agent optionally calls `call_analytics_agent` for further processing
+8. Root agent formats response with `mecdm_viz` JSON blocks
+9. Response saved to user DB, returned to frontend
+
+**Map generation example** ("Show a map of institutional deliveries by district"):
+
+1. `call_alloydb_agent` retrieves metric data with join key (e.g., `district_code_lgd`)
+2. Root agent calls `generate_map_viz` with geography level and metric column
+3. Tool fetches PostGIS geometry via MCP Toolbox (`ST_AsGeoJSON`)
+4. Joins metric data to geometry on LGD codes
+5. Optionally fetches facility/AWC overlay data
+6. Returns GeoJSON + overlay structure as `mecdm_viz` block
+7. Frontend renders the interactive map
+
+## Visualization Output
+
+The agent returns structured JSON blocks (not images) for the frontend to render:
+
+| Block Type | Description |
+|---|---|
+| `mecdm_viz:chart` | Bar, line, pie, area charts |
+| `mecdm_viz:map` | Choropleth, bubble maps with facility/AWC overlays |
+| `mecdm_viz:stat_cards` | KPI cards with trends and colors |
+| `mecdm_viz:table` | Structured data tables |
+| `mecdm_stat` | Query builder for aggregations (8 allowlisted tables, 10 chart types, time-range presets) |
+
+## Project Structure
+
+```
+backend/
+├── main.py                              # Cloud Run entry point
+├── data_science/
+│   ├── agent.py                         # Root agent definition, dataset config loading
+│   ├── prompts.py                       # Root agent system prompt (MCH domain knowledge)
+│   ├── tools.py                         # 11 root-level tools
+│   ├── fast_api_app.py                  # FastAPI app factory (production)
+│   │
+│   ├── sub_agents/
+│   │   ├── alloydb/
+│   │   │   ├── agent.py                 # NL2SQL sub-agent
+│   │   │   ├── prompts.py               # NL2SQL instructions
+│   │   │   └── tools.py                 # SQL generation + query execution
+│   │   └── analytics/
+│   │       ├── agent.py                 # Analytics sub-agent (Vertex AI Code Executor)
+│   │       └── prompts.py               # NL2Py instructions
+│   │
+│   ├── routers/
+│   │   ├── chat.py                      # Chat session & message endpoints
+│   │   └── feedback.py                  # User feedback endpoints
+│   │
+│   ├── utils/
+│   │   ├── map_utils.py                 # PostGIS geometry joining, GeoJSON building
+│   │   └── utils.py                     # General utilities
+│   │
+│   └── app_utils/
+│       ├── models.py                    # SQLAlchemy models (ChatSession, ChatMessage, Feedback, GoldenSql)
+│       ├── sql_validator.py             # pglast-based SQL injection prevention
+│       ├── telemetry.py                 # OpenTelemetry + GCS telemetry
+│       ├── user_db.py                   # User DB session factory
+│       └── typing.py                    # Type definitions
+│
+├── mecdm_superapp_config.json           # Dataset config (25 tables, cross-relations)
+├── cross_dataset_relations.json         # 18 foreign key relationships
+├── dataset_schema.json                  # JSON Schema for config validation
+├── pyproject.toml                       # Dependencies
+├── Makefile                             # Dev, deploy, test commands
+├── Dockerfile                           # Container build
+├── .env.example                         # Environment template
+├── tests/                               # Unit + integration tests
+├── eval/                                # Agent evaluation
+└── migrations/                          # Database migrations
+```
+
+## Data Schema
+
+25 tables across 6 categories in AlloyDB:
+
+| Category | Tables |
+|---|---|
+| Geographic Boundaries (PostGIS) | `states`, `districts`, `subdistricts`, `villages_poly`, `villages_point` |
+| Master Reference (LGD codes) | `master_districts`, `master_blocks`, `master_villages`, `master_health_facilities` |
+| Health Infrastructure | `master_health_facilities`, `anganwadi_centres` |
+| MCH Tracking (core) | `mother_journeys`, `anc_visits`, `village_indicators_monthly` |
+| Raw Source Records | `raw_pregnancy_records`, `raw_anc_records`, `raw_child_records` |
+| Survey & Reference | `nfhs_indicators`, `research_articles`, `video_library`, `geo_full_mapping` |
+
+**Key schema notes:**
+- Census tables use `geometry` column; master tables use `geom`
+- Health data uses UPPERCASE names; census uses Title Case
+- Prefer integer code joins (`district_code_lgd`, `block_code_lgd`) over name joins
+- `mother_journeys` / `anc_visits`: all columns are TEXT -- cast to numeric/date as needed
+
+## Design Decisions
+
+- **JSON-first visualization** -- returns structured data, not images. Frontend controls rendering.
+- **Privacy by design** -- always aggregates data, never exposes individual identifiers. Read-only database access.
+- **SQL injection prevention** -- all generated SQL validated through `pglast` (PostgreSQL C parser) before execution.
+- **Spatial-first** -- PostGIS integration for geometry queries, facility proximity, and map generation as first-class features.
+- **Few-shot NL2SQL** -- golden SQL examples from a curated database guide the LLM's SQL generation.
+- **Multi-persona routing** -- root agent prompt encodes MCH domain knowledge (red flag thresholds, derived metrics) and adapts responses by user role.
+
+## Setup
 
 ### Prerequisites
 
-*   **Google Cloud Account:** You need a Google Cloud account with BigQuery
-    enabled.
-*   **Python 3.12+:** Ensure you have Python 3.12 or a later version installed.
-*   **uv:** Install uv by following the instructions on the official uv website:
-    [https://docs.astral.sh/uv/getting-started/installation/](https://docs.astral.sh/uv/getting-started/installation/)
-*   **Git:** Ensure you have git installed. If not, you can download it from
-    [https://git-scm.com/](https://git-scm.com/) and follow the [installation
-    guide](https://git-scm.com/book/en/v2/Getting-Started-Installing-Git).
-
-
-### ADK Project Setup with uv
-
-First, you need to install and configure the core ADK agent. After this you'll
-set up the data sources to be used with the agent.
-
-1.  **Clone the Repository:**
-
-    ```bash
-    git clone https://github.com/google/adk-samples.git
-    cd adk-samples/python/agents/data-science
-    ```
-
-1.  **Install Dependencies with uv:**
-
-    ```bash
-    uv sync
-    ```
-
-    This command reads the `pyproject.toml` file and installs all the necessary
-    dependencies into a virtual environment managed by uv. On the first run,
-    this command will also create a new virtual environment.
-
-    By default, the virtual environment will be created in a `.venv` directory
-    inside `adk-samples/python/agents/data-science`. If you already have a virtual
-    environment created, or you want to use a different location, you can use
-    the `--active` flag for `uv` commands, and/or change the
-    `UV_PROJECT_ENVIRONMENT` environment variable. See
-    [How to customize uv's virtual environment location](https://pydevtools.com/handbook/how-to/how-to-customize-uvs-virtual-environment-location/)
-    for more details.
-
-1.  **Activate the uv Shell:**
-
-    If you are using the `uv` default virtual environment, you now need
-    to activate the environment.
-
-    ```bash
-    source .venv/bin/activate
-    ```
-
-1.  **Set up Environment Variables:**
-
-    Rename the file ".env.example" to ".env"
-    Fill the below values:
-
-    ```bash
-    # Choose Model Backend: 0 -> ML Dev, 1 -> Vertex
-    GOOGLE_GENAI_USE_VERTEXAI=1
-
-    # ML Dev backend config. Fill if using Ml Dev backend.
-    GOOGLE_API_KEY='YOUR_VALUE_HERE'
-
-    # Vertex backend config
-    GOOGLE_CLOUD_PROJECT='YOUR_VALUE_HERE'
-    GOOGLE_CLOUD_LOCATION='YOUR_VALUE_HERE'
-    ```
-
-1.  **Code Interpreter Setup:**
-
-    The Data Science Agent also relies on a Vertex AI Code Interpreter extension.
-
-    If an extension has already been created, provide the full resource name of
-    the pre-existing Code Interpreter extension
-    (e.g., `projects/<YOUR_PROJECT_ID>/locations/<YOUR_LOCATION>/extensions/<YOUR_EXTENSION_ID>`).
-    in the `CODE_INTERPRETER_EXTENSION_NAME` variable in the .env file.
-
-    If an extension name is not provided, a new extension will be created.
-    Check the logs for the Vertex Extension ID and provide the value in your
-    environment variables for future runs to avoid creating multiple extensions.
-
-
-1. **NL2SQL Configuration:**
-
-    For BigQuery NL2SQL generation, the gent can use one of two methods: either
-    querying Gemini directly, or [CHASE-SQL](https://arxiv.org/abs/2410.01943).
-    Set the variable `NL2SQL_METHOD` to either `BASELINE` (to use Gemini) or
-    `CHASE` to use CHASE-SQL.
-
-    For AlloyDB NL2SQL generation the agent will always use  Gemini, so the
-    value of `NL2SQL_METHOD` will not affect the AlloyDB sub-agent.
-
-## Database Setup
-
-This sample has two alternate data sets that can be used. The
-`ticket_sales_history` dataset only uses BigQuery, so if you plan to use
-that dataset, you can skip the AlloyDB setup steps below.
-
-The `cymbal_flights` dataset uses both BigQuery and AlloyDb. If you plan to
-use that dataset, you should follow the instructions below for both BigQuery
-and AlloyDB.
-
-### <a name="bigquery-setup">BigQuery Setup</a>
-
-Set the BigQuery project IDs in the `.env` file. This can be the same GCP
-Project you use for `GOOGLE_CLOUD_PROJECT`, but you can use other BigQuery
-projects as well, as long as you have access permissions to that project.
-
-In some cases you may want to separate the BigQuery compute consumption from
-BigQuery data storage. You can set `BQ_DATA_PROJECT_ID` to the project you
-use for data storage, and `BQ_COMPUTE_PROJECT_ID` to the project you want to
-use for compute. Otherwise, you can set both `BQ_DATA_PROJECT_ID` and
-`BQ_COMPUTE_PROJECT_ID` to the same project id.
-
-If you have an existing BigQuery table you wish to connect, specify the
-`BQ_DATASET_ID` in the `.env` file as well. Otherwise set this value
-according to the choice of sample dataset (see above).
-
-We recommend not adding any production critical datasets to this sample agent.
-
-### <a name="alloydb-setup">AlloyDB Setup</a>
-
-#### AlloyDB Cluster Configuration
-
-For this demo, we will setup your AlloyDB cluster in the same project
-as you will be using for the Vertex AI API calls. In a production
-scenario, this would likely be in a different project; in that case,
-you would need to set up some form of VPC peering between the projects to
-allow your ADK Agent to access the AlloyDB cluster.
-
-1. Enable APIs:
-
-    ```bash
-    gcloud services enable alloydb.googleapis.com \
-                           compute.googleapis.com \
-                           cloudresourcemanager.googleapis.com \
-                           servicenetworking.googleapis.com \
-                           vpcaccess.googleapis.com \
-                           aiplatform.googleapis.com
-    ```
-
-1. Download and install [postgres-client cli (`psql`)][install-psql].
-
-1. Install the [AlloyDB Auth Proxy][install-alloydb-auth-proxy].
-
-1. Set environment variables. For security reasons, use a different password for
-   `$DB_PASS` and note it for future use:
-
-    ```bash
-    export CLUSTER=my-alloydb-cluster
-    export INSTANCE=my-alloydb-instance
-    export REGION=global
-    export DB_USER=postgres
-    export DB_PASS=my-alloydb-pass
-    ```
-
-1. Create an AlloyDB cluster:
-
-    ```bash
-    gcloud alloydb clusters create $CLUSTER \
-        --password=$DB_PASS\
-        --network=default \
-        --region=$REGION \
-        --project=$PROJECT_ID
-    ```
-
-1. Create a primary instance:
-
-    ```bash
-    gcloud alloydb instances create $INSTANCE \
-        --instance-type=PRIMARY \
-        --cpu-count=8 \
-        --region=$REGION \
-        --cluster=$CLUSTER \
-        --project=$PROJECT_ID \
-        --ssl-mode=ALLOW_UNENCRYPTED_AND_ENCRYPTED \
-        --database-flags=password.enforce_complexity=on
-    ```
-
-1. Enable public IP on instance:
-
-    ```bash
-    gcloud alloydb instances update $INSTANCE \
-        --cluster=$CLUSTER  \
-        --region=$REGION  \
-        --assign-inbound-public-ip=ASSIGN_IPV4
-    ```
-
-1. Connect to instance using AlloyDB auth proxy:
-
-    ```bash
-    ./alloydb-auth-proxy --public-ip \
-        "projects/$PROJECT_ID/locations/$REGION/clusters/$CLUSTER/instances/$INSTANCE"
-    ```
-
-1. Verify you can connect to your instance with the `psql` tool. Enter
-   password for AlloyDB (`$DB_PASS` environment variable set above) when prompted:
-
-    ```bash
-    psql -h 127.0.0.1 -p 5432 -U $DB_USER
-    ```
-
-[install-psql]: https://www.timescale.com/blog/how-to-install-psql-on-mac-ubuntu-debian-windows/
-[install-alloydb-auth-proxy]: https://cloud.google.com/alloydb/docs/auth-proxy/connect#install
-
-## Running the Agent
-
-You can run the agent using the ADK command in your terminal.
-from the working directory:
-
-1.  Run agent in CLI:
-
-    ```bash
-    uv run adk run data_science
-    ```
-
-1.  Run agent with ADK Web UI:
-    ```bash
-    uv run adk web
-    ```
-    Select the data_science from the dropdown
-
-
-
-### Example Agent Interaction
-
-Here's a quick example of how a user might interact with the Data Science
-Multi-Agent System using the _Forecasting Sticker Sales_ dataset.
-
-> ´**User:** Hi, What data do you have access to?
-
-> **Agent:**  I have access to two tables: `train` and `test`. Both tables
-contain sticker sales data with the following columns: `id`, `date`, `country`,
-`store`, `product`, and `num_sold`.
-
-> **User:** I need more details on the train table. What countries exist? How
-many stores are there?
-
-> **Agent:** Result: The train table contains data from Canada, Finland, Italy,
-Kenya, Norway, and Singapore. Each of these countries has 3 distinct stores.
-
->Explanation: The database agent executed a SQL query against the train table to
-find the distinct countries and the number of distinct stores within each
-country. The query grouped the results by country and counted the distinct store
-values.
-
-> **User:** Please generate a plot with total sales per country.
-
-> **Agent:**  Result: A bar plot has been generated showing the total sales per
-country. The x-axis represents the country, and the y-axis represents the total
-sales.
-
-> Explanation:
-> 1. The database agent was first called to retrieve the total sales per country
-     from the train table.
-> 2. The data science agent was then called to generate a bar plot visualizing
-     the results. The plot displays each country on the x-axis and its corresponding
-     total sales on the y-axis.
-
-> **User:** What kinds of forecasting models can I train in BQML?
-
-> **Agent:** You can train several types of forecasting models in BQML,
-including ARIMA, Exponential Smoothing, and Temporal Fusion Transformer (TFT)
-models. Would you like to proceed with training a forecasting model?
-
-> **User:** Yes
-
-> **Agent:** Okay, before proceeding, let's confirm the project and dataset ID
-for BQML. We'll be using the `PROJECT_ID` project and the
-`forecasting_sticker_sales` dataset. Does that sound right?
-
-> **User:** Yes
-
-> **Agent:** The BQML supports `ARIMA_PLUS`, `ARIMA_PLUS_XREG`.
-
->To proceed, I need to know which model you'd like to use. I also need to know
-the following:
-
->*   The name of the column that provides the time points (e.g., 'date').
->*   The name of the column that contains the data to forecast (e.g., 'num_sold').
->*   Do you want to fit and forecast multiple time series using a single query?
-If so, what are the ID columns? (e.g., `country`, `store`, `product`)
-
-
-## Testing and Evaluation
-
-To run the test and evaluation code, you need a few additional dependencies. Run
-the following uv command from the `agents/data-science` directory to install them:
-```bash
-uv sync
-```
-
-### Running Evaluations
-
-Evaluation tests assess the overall performance and capabilities of the agent in
-a holistic manner.
-
-**Run Evaluation Tests:**
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
+- Google Cloud account with Vertex AI enabled
+- AlloyDB instance with PostGIS
+- MCP Toolbox for Databases (local or Cloud Run)
+
+### Installation
 
 ```bash
-uv run pytest eval
+# Install dependencies
+make install
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your credentials (see below)
 ```
 
-- This command executes all test files within the `eval/` directory.
-- `uv run` ensures that pytest runs within the project's virtual environment.
-
-### Running Tests
-
-Tests assess the overall executability of the agents.
-
-**Test Categories:**
-
-*   **Integration Tests:** These tests verify that the agents can interact
-    correctly with each other and with external services like BigQuery. They
-    ensure that the root agent can delegate tasks to the appropriate sub-agents
-    and that the sub-agents can perform their intended tasks.
-*    **Sub-Agent Functionality Tests:** These tests focus on the specific
-     capabilities of each sub-agent (e.g., Database Agent, BQML Agent). They
-     ensure that each sub-agent can perform its intended tasks, such as
-     executing SQL queries or training BQML models.
-*   **Environment Query Tests:** These tests verify that the agent can handle
-    queries that are based on the environment.
-
-**Run Tests:**
+### Environment Variables
 
 ```bash
-uv run pytest tests
+# Vertex AI
+GOOGLE_GENAI_USE_VERTEXAI=1
+GOOGLE_CLOUD_PROJECT=your-project-id
+GOOGLE_CLOUD_LOCATION=your-region
+
+# Dataset config
+DATASET_CONFIG_FILE=mecdm_superapp_config.json
+
+# Models
+ROOT_AGENT_MODEL=gemini-2.5-pro
+ANALYTICS_AGENT_MODEL=gemini-2.5-pro
+BASELINE_NL2SQL_MODEL=gemini-2.5-pro
+ALLOYDB_AGENT_MODEL=gemini-2.5-pro
+
+# AlloyDB / MCP Toolbox
+ALLOYDB_TOOLSET=postgres-database-tools
+ALLOYDB_SCHEMA_NAME=public
+ALLOYDB_DATABASE=your-db-name
+ALLOYDB_PROJECT_ID=your-project-id
+MCP_TOOLBOX_HOST=localhost
+MCP_TOOLBOX_PORT=5000
+
+# User database (auth, chat sessions, feedback)
+DATABASE_URL_USER=postgresql://user:pass@host/dbname
+
+# Cross-dataset relations
+CROSS_DATASET_RELATIONS_DEFS=./cross_dataset_relations.json
 ```
 
-- This command executes all test files within the `tests/` directory.
-- `uv run` ensures that pytest runs within the project's virtual environment.
-
-
-## Deployment on Vertex AI Agent Engine
-
-### Initial Setup
-
-To deploy the agent to Google Agent Engine, first follow
-[these steps](https://cloud.google.com/vertex-ai/generative-ai/docs/agent-engine/set-up)
-to set up your Google Cloud project for Agent Engine.
-
-You also need to give BigQuery User, BigQuery Data Viewer, and Vertex AI User
-permissions to the Reasoning Engine Service Agent. Run the following commands to
-grant the required permissions:
+### Running Locally
 
 ```bash
-export RE_SA="service-${GOOGLE_CLOUD_PROJECT_NUMBER}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
-gcloud projects add-iam-policy-binding ${GOOGLE_CLOUD_PROJECT} \
-    --member="serviceAccount:${RE_SA}" \
-    --condition=None \
-    --role="roles/bigquery.user"
-gcloud projects add-iam-policy-binding ${GOOGLE_CLOUD_PROJECT} \
-    --member="serviceAccount:${RE_SA}" \
-    --condition=None \
-    --role="roles/bigquery.dataViewer"
-gcloud projects add-iam-policy-binding ${GOOGLE_CLOUD_PROJECT} \
-    --member="serviceAccount:${RE_SA}" \
-    --condition=None \
-    --role="roles/aiplatform.user"
+# Start the backend (default port 8000)
+make local-backend
+
+# Or specify a port
+make local-backend PORT=8001
+
+# Launch the ADK playground UI (port 8501)
+make playground
 ```
 
-### Deployment Steps
-
-#### MCP Toolbox Deployment
-
-Follow these steps to deploy the MCP Toolbox for Databases on Cloud Run. For
-more details on the process, see the official
-[Cloud Run deployment instructions](deploy-mcp-toolbox).
-
-1. Enable the required Google Cloud APIs:
-    ```bash
-    gcloud services enable run.googleapis.com \
-                        cloudbuild.googleapis.com \
-                        artifactregistry.googleapis.com \
-                        iam.googleapis.com \
-                        secretmanager.googleapis.com
-    ```
-
-1. Ensure the account used for administering your Google Cloud project has the
-approriate IAM roles:
-    * Create Service Account role (`roles/iam.serviceAccountCreator`)
-    * Secret Manager Admin role (`roles/secretmanager.admin`)
-    * Cloud Run Developer (`roles/run.developer`)
-    * Service Account User role (`roles/iam.serviceAccountUser`)
-
-    ```bash
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member user:$USER_ACCOUNT \
-        --role roles/iam.serviceAccountCreator \
-        --role roles/secretmanager.admin \
-        --role roles/run.developer \
-        --role roles/iam.serviceAccountUser
-    ```
-
-1. Create a service account for the MCP Toolbox:
-    ```bash
-    gcloud iam service-accounts create toolbox-identity
-    ```
-1. Grant permissions to use secret manager.
-    ```bash
-    gcloud projects add-iam-policy-binding $PROJECT_ID \
-        --member serviceAccount:toolbox-identity@$PROJECT_ID.iam.gserviceaccount.com \
-        --role roles/secretmanager.secretAccessor
-    ```
-
-1. [Create a secret](create-a-secret) for the AlloyDB user password.
-    ```bash
-    export ALLOYDB_POSTGRES_PASSWORD=<your Postgres user password>
-    echo -n $ALLOYDB_POSTGRES_PASSWORD | \
-        gcloud secrets create ALLOYDB_POSTGRES_PASSWORD \
-        --replication-policy="automatic" \
-        --data-file=-
-    ```
-    Note that the previous command will expose the database password in plaintext
-    in the list of processes on your machine and in your shell history. To prevent
-    this, store the password in a data file (e.g. `db-pass.txt`) and use this
-    command instead.
-    ```bash
-    gcloud secrets create ALLOYDB_POSTGRES_PASSWORD \
-        --replication-policy="automatic" \
-        --data-file="db-pass.txt"
-    ```
-
-1. Copy the `toolbox.env-example` file to a version called `toolbox.env` with
-the appropriate values for your project and AlloyDB setup.
-
-1. Add the `toolbox-alloydb-remote.yaml` configuration file to Secret Manager.
-    ```bash
-    gcloud secrets create tools --data-file=toolbox-alloydb-remote.yaml
-    ```
-1. Export an environment variable for the container image to use for Cloud Run:
-    ```bash
-    export IMAGE=global-docker.pkg.dev/database-toolbox/toolbox/toolbox:latest
-    ```
-
-1. Deploy Toolbox to Cloud Run.
-    ```bash
-    # TODO(dev): update --network and --subnet to match your VPC if necessary
-    gcloud run deploy toolbox \
-        --image $IMAGE \
-        --service-account toolbox-identity \
-        --region global \
-        --set-secrets "/app/tools.yaml=tools:latest,ALLOYDB_POSTGRES_PASSWORD=ALLOYDB_POSTGRES_PASSWORD:latest" \
-        --env-vars-file="toolbox.env" \
-        --args="--tools-file=/app/tools.yaml","--address=0.0.0.0","--port=8080" \
-        --network default \
-        --subnet default
-        # --allow-unauthenticated # https://cloud.google.com/run/docs/authenticating/public#gcloud
-
-    ```
-
-1. When the MCP Toolbox is deployed, you should be able to run the following command
-to get a URL for the deployed Toolbox instance:
-    ```bash
-    gcloud run services describe toolbox --format 'value(status.url)'
-    ```
-
-1. Set the value of `MCP_TOOLBOX_HOST` in your `.env` file to that hostname. NOTE: Do not include
-the `https://` prefix.
-
-[deploy-mcp-toolbox]: https://googleapis.github.io/genai-toolbox/how-to/deploy_toolbox/
-[create-a-secret]: https://cloud.google.com/secret-manager/docs/creating-and-accessing-secrets
-
-#### Agent Deployment
-
-Next, you need to create a `.whl` file for your agent. From the `data-science`
-directory, run this command:
+### Testing
 
 ```bash
-uv build --wheel --out-dir deployment
+# Run unit + integration tests
+make test
+
+# Run agent evaluation
+make eval
+
+# Run all evalsets
+make eval-all
+
+# Lint
+make lint
 ```
 
-This will create a file named `data_science-0.1-py3-none-any.whl` in the
-`deployment` directory.
+## Deployment
 
-Then run the below command. This will create a staging bucket in your GCP
-project and deploy the agent to Vertex AI Agent Engine:
+Deploy to Google Cloud Run:
 
 ```bash
-cd deployment/
-python3 deploy.py --create
+# Standard deployment
+make deploy
+
+# With Identity-Aware Proxy
+make deploy IAP=true
 ```
 
-When this command returns, if it succeeds it will print an AgentEngine resource
-name that looks something like this:
-```
-projects/************/locations/global/reasoningEngines/7737333693403889664
-```
-The last sequence of digits is the AgentEngine resource ID.
-
-Once you have successfully deployed your agent, you can interact with it
-using the `test_deployment.py` script in the `deployment` directory. Store the
-agent's resource ID in an environment variable and run the following command:
+Infrastructure setup via Terraform:
 
 ```bash
-export RESOURCE_ID=...
-export USER_ID=<any string>
-python test_deployment.py --resource_id=$RESOURCE_ID --user_id=$USER_ID
+make setup-dev-env
 ```
-
-The session will look something like this:
-```
-Found agent with resource ID: ...
-Created session for user ID: ...
-Type 'quit' to exit.
-Input: Hello. What data do you have?
-Response: I have access to the train and test tables inside the
-forecasting_sticker_sales dataset.
-...
-```
-
-Note that this is *not* a full-featured, production-ready CLI; it is just
-intended to show how to use the Agent Engine API to interact with a deployed
-agent.
-
-The main part of the `test_deployment.py` script is approximately this code:
-
-```python
-from vertexai import agent_engines
-remote_agent = vertexai.agent_engines.get(RESOURCE_ID)
-session = remote_agent.create_session(user_id=USER_ID)
-while True:
-    user_input = input("Input: ")
-    if user_input == "quit":
-      break
-
-    for event in remote_agent.stream_query(
-        user_id=USER_ID,
-        session_id=session["id"],
-        message=user_input,
-    ):
-        parts = event["content"]["parts"]
-        for part in parts:
-            if "text" in part:
-                text_part = part["text"]
-                print(f"Response: {text_part}")
-```
-
-To delete the agent, run the following command (using the resource ID returned
-previously):
-```bash
-python3 deployment/deploy.py --delete --resource_id=RESOURCE_ID
-```
-
-
 
 ## Optimizing and Adjustment Tips
 
-*   **Prompt Engineering:** Refine the prompts for `root_agent`, `bqml_agent`,
-    `bigquery_agent`, `alloydb_agent`, and `ds_agent` to improve accuracy and
-    guide the agents more effectively. Experiment with different phrasing and
-    levels of detail.
-*   **Extension:** Extend the multi-agent system with your own AgentTools or
-    sub_agents. You can do so by adding additional tools and sub_agents to the
-    root agent inside `agents/data-science/data_science/agent.py`.
-*   **Partial imports:** If you only need certain capabilities inside the
-    multi-agent system, e.g. just the data agent, you can import the data_agent
-    as an AgentTool into your own root agent.
-*   **Model Selection:** Try different language models for both the top-level
-    agent and the sub-agents to find the best performance for your data and
-    queries.
+- **Prompt Engineering:** Refine the system prompts in `data_science/prompts.py` and sub-agent prompts (`sub_agents/alloydb/prompts.py`, `sub_agents/analytics/prompts.py`) to improve accuracy. The root agent prompt contains MCH domain knowledge, red flag thresholds, and routing logic -- adjust these to match evolving data or requirements.
+- **Golden SQL Examples:** Add curated question-SQL pairs to the `GoldenSql` table in the user database. The AlloyDB agent uses these as few-shot examples for NL2SQL generation -- more examples directly improve query accuracy.
+- **Model Selection:** Swap models per agent via environment variables (`ROOT_AGENT_MODEL`, `ALLOYDB_AGENT_MODEL`, `ANALYTICS_AGENT_MODEL`). Use a heavier model (e.g., `gemini-2.5-pro`) for the root agent and lighter models (e.g., `gemini-2.5-flash`) for sub-agents to balance quality and latency.
+- **Dataset Configuration:** Edit `mecdm_superapp_config.json` to add/remove tables, update column descriptions, or adjust cross-dataset relationships in `cross_dataset_relations.json`. Clear descriptions on tables and columns significantly boost NL2SQL performance.
+- **Adding Tools:** Add new tools to the root agent in `data_science/tools.py` and register them in `data_science/agent.py`. Each tool should return a string result.
+- **Adding Sub-Agents:** Create a new directory under `data_science/sub_agents/` with `agent.py`, `prompts.py`, and `tools.py`, then register it as an `AgentTool` in the root agent.
+- **Visualization Schemas:** The `mecdm_viz` and `mecdm_stat` JSON schemas are defined in the root agent prompt. Modify them there to add new chart types or data fields.
 
+## Configuration Files
 
-## Troubleshooting
-
-*   If you face `500 Internal Server Errors` when running the agent, simply
-    re-run your last command. That should fix the issue.
-*   If you encounter issues with the code interpreter, review the logs to
-    understand the errors. Make sure you're using base-64 encoding for
-    files/images if interacting directly with a code interpreter extension
-    instead of through the agent's helper functions.
-*   If you see errors in the SQL generated, try the following:
-    - including clear descriptions in your tables and columns help boost
-      performance
-    - if your database is large, try setting up a RAG pipeline for schema
-      linking by storing your table schema details in a vector store
-
-## Clean Up
-
-Clean up after completing the demo.
-
-1. Set environment variables:
-
-    ```bash
-    export CLUSTER=my-alloydb-cluster
-    export REGION=global
-    ```
-
-1. Delete AlloyDB cluster that contains instances:
-
-    ```bash
-    gcloud alloydb clusters delete $CLUSTER \
-        --force \
-        --region=$REGION \
-        --project=$PROJECT_ID
-    ```
-
-## Deployment on Google Cloud Run
-
-These instructions walk through the process of deploying the Data Science agent to Google Cloud Run, including Cloud SQL for session storage.
-
-### Before you begin
-
-Deploying to Google Cloud Run requires:
-
-- A [Google Cloud project](https://cloud.google.com/resource-manager/docs/creating-managing-projects) with billing enabled.
-- `gcloud` CLI ([Installation instructions](https://cloud.google.com/sdk/docs/install))
-
-### 1 - Authenticate the Google Cloud CLI, and enable Google Cloud APIs.
-
-```
-gcloud auth login
-gcloud auth application-default login
-
-export PROJECT_ID="<YOUR_PROJECT_ID>"
-gcloud config set project $PROJECT_ID
-
-gcloud services enable sqladmin.googleapis.com \
-   compute.googleapis.com \
-   cloudresourcemanager.googleapis.com \
-   servicenetworking.googleapis.com \
-   aiplatform.googleapis.com
-```
-
-### 2 - Create a Cloud SQL instance for the agent sessions service.
-
-```bash
-gcloud sql instances create ds-agent-session-service \
-   --database-version=POSTGRES_17 \
-   --tier=db-g1-small \
-   --region=global \
-   --edition=ENTERPRISE \
-   --root-password=ds-agent-demo
-```
-
-Once created, you can view your instance in the Cloud Console [here](https://console.cloud.google.com/sql/instances/ds-agent-session-service/overview).
-
-### 3 - Deploy the agent to Cloud Run
-Now we are ready to deploy the Data Science agent to Cloud Run! :rocket:
-
-```bash
-gcloud run deploy data-science-agent \
-  --source . \
-  --port 8080 \
-  --memory 2G \
-  --project $PROJECT_ID \
-  --allow-unauthenticated \
-  --add-cloudsql-instances $PROJECT_ID:global:ds-agent-session-service \
-  --update-env-vars SERVE_WEB_INTERFACE=True,SESSION_SERVICE_URI="postgresql+pg8000://postgres:ds-agent-demo@postgres/?unix_sock=/cloudsql/$PROJECT_ID:global:ds-agent-session-service/.s.PGSQL.5432",GOOGLE_CLOUD_PROJECT=$PROJECT_ID \
-  --region global
-```
-
-When this runs successfully, you should see:
-
-```bash
-Service [data-science-agent] revision [data-science-agent-00001-aaa] has been deployed and is serving 100 percent of traffic.
-```
-
-### 4 - Test the Cloud Run Deployment
-
-Open the Cloud Run Service URL outputted by the previous step.
-You should see the ADK Web UI for the Data Science Agent.
-
-### Clean up
-
-You can clean up this agent sample by:
-- Deleting the [Cloud Run Services](https://console.cloud.google.com/run).
-- Deleting the [Cloud SQL instance](https://console.cloud.google.com/sql/instances).
-
-
-## Disclaimer
-
-This agent sample is provided for illustrative purposes only and is not intended
-for production use. It serves as a basic example of an agent and a foundational
-starting point for individuals or teams to develop their own agents.
-
-This sample has not been rigorously tested, may contain bugs or limitations, and
-does not include features or optimizations typically required for a production
-environment (e.g., robust error handling, security measures, scalability,
-performance considerations, comprehensive logging, or advanced configuration
-options).
-
-Users are solely responsible for any further development, testing, security
-hardening, and deployment of agents based on this sample. We recommend thorough
-review, testing, and the implementation of appropriate safeguards before using
-any derived agent in a live or critical system.
-
-
-[mcp-toolbox]: https://googleapis.github.io/genai-toolbox/
-[adk-builtin-tool-bq]: https://google.github.io/adk-docs/tools/built-in-tools/#bigquery
+| File | Purpose |
+|---|---|
+| `mecdm_superapp_config.json` | Defines all 25 tables, their descriptions, columns, and which AlloyDB dataset they belong to |
+| `cross_dataset_relations.json` | 18 foreign key relationships between tables (e.g., `mother_journeys` <-> `anc_visits` via `mother_id`) |
+| `dataset_schema.json` | JSON Schema that validates the config file format |
+| `toolbox-alloydb-local.yaml` | MCP Toolbox config for local AlloyDB connection |
+| `toolbox-alloydb-remote.yaml` | MCP Toolbox config for Cloud Run deployment |
