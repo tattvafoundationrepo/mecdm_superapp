@@ -144,25 +144,6 @@ set up the data sources to be used with the agent.
     GOOGLE_CLOUD_LOCATION='YOUR_VALUE_HERE'
     ```
 
-1.  **BQML Setup:**
-
-    The BQML Agent uses the Vertex AI RAG Engine to query the full BigQuery ML
-    Reference Guide.
-
-    Before running the setup, ensure your project ID is added in .env file:
-    `"GOOGLE_CLOUD_PROJECT"`. Leave the corpus name empty in the .env file:
-    `BQML_RAG_CORPUS_NAME = ''`. The corpus name will be added automatically
-    once it's created.
-
-    To set up the RAG Corpus for your project, run the methods
-    `create_RAG_corpus()` and `ingest_files()` in
-    `data-science/data_science/utils/reference_guide_RAG.py` by running the
-    below command from the working directory:
-
-    ```bash
-    python3 data_science/utils/reference_guide_RAG.py
-    ```
-
 1.  **Code Interpreter Setup:**
 
     The Data Science Agent also relies on a Vertex AI Code Interpreter extension.
