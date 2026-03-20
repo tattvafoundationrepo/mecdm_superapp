@@ -116,11 +116,11 @@ MapPayload schema:
 - map.metricColumn: the numeric measure alias to visualize (color/size)
 - map.joinKey: the dimension alias used to join with geometry (must match a dimension alias in query)
 - map.joinTarget: "name" (default for district/block) or "code" (default for village). Omit to use the default.
-- map.colorScheme: optional {minColor, maxColor} for custom colors. Default: blue scale.
+- map.colorScheme: optional minColor, maxColor for custom colors. Default: blue scale.
 - overlays.facilities: true to show health facility markers (DH/CHC/PHC/SC with layer toggles)
 - overlays.awc: true to show Anganwadi centre markers
 - title: short descriptive map title
-- geoFilter: optional {district_name} to scope block maps to a single district
+- geoFilter: optional district_name to scope block maps to a single district
 
 Example — district choropleth:
 ```mecdm_map
