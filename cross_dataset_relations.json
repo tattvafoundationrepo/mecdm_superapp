@@ -1,388 +1,319 @@
 {
-  "foreign_keys": [
+  "$schema": "cross_dataset_relations_v1",
+  "metadata": {
+    "version": "1.0.0",
+    "description": "Cross-dataset relationship definitions for MECDM tables",
+    "notes": "These are the ONLY valid join paths. Do not assume relationships not defined here."
+  },
+  "hierarchies": {
+    "administrative": {
+      "description": "Meghalaya administrative hierarchy: State → District → Block → Village",
+      "levels": [
+        {
+          "name": "state",
+          "table": "states",
+          "pk": "lgd_statecode"
+        },
+        {
+          "name": "district",
+          "table": "districts",
+          "pk": "lgd_districtcode",
+          "fk_to_parent": "lgd_statecode"
+        },
+        {
+          "name": "subdistrict",
+          "table": "subdistricts",
+          "pk": "lgd_subdistrictcode",
+          "fk_to_parent": "lgd_districtcode"
+        },
+        {
+          "name": "village",
+          "table": "villages_point",
+          "pk": "lgd_villagecode",
+          "fk_to_parent": "lgd_subdistrictcode"
+        }
+      ]
+    },
+    "master_reference": {
+      "description": "Master reference hierarchy with LGD codes",
+      "levels": [
+        {
+          "name": "district",
+          "table": "master_districts",
+          "pk": "district_code_lgd"
+        },
+        {
+          "name": "block",
+          "table": "master_blocks",
+          "pk": "block_code_lgd",
+          "fk_to_parent": "district_code_lgd"
+        },
+        {
+          "name": "village",
+          "table": "master_villages",
+          "pk": "village_id",
+          "fk_to_parent": "block_code_lgd"
+        },
+        {
+          "name": "facility",
+          "table": "master_health_facilities",
+          "pk": "facility_id",
+          "fk_to_parent": "block_code_lgd"
+        }
+      ]
+    }
+  },
+  "relations": [
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "raw_pregnancy_records",
-        "column": "pregnancy_id"
+      "id": "geo_to_master_district",
+      "description": "Link geographic districts to master reference",
+      "from": {
+        "table": "districts",
+        "column": "lgd_districtcode"
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "mother_journeys",
-        "column": "pregnancy_id"
+      "to": {
+        "table": "master_districts",
+        "column": "district_code_lgd"
       },
-      "enforced": true,
-      "note": "Each raw pregnancy record belongs to a mother journey. Use when you need raw source fields not present in the summarised mother_journeys table."
+      "cardinality": "one_to_one",
+      "join_quality": "exact"
     },
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "raw_anc_records",
-        "column": "pregnancy_id"
+      "id": "master_blocks_to_districts",
+      "description": "Link blocks to districts via LGD code",
+      "from": {
+        "table": "master_blocks",
+        "column": "district_code_lgd"
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "mother_journeys",
-        "column": "pregnancy_id"
+      "to": {
+        "table": "master_districts",
+        "column": "district_code_lgd"
       },
-      "enforced": true,
-      "note": "Each raw ANC visit record belongs to a mother journey. pregnancy_id may not be present in all records — use mother_id as the fallback join."
+      "cardinality": "many_to_one",
+      "join_quality": "exact"
     },
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "raw_child_records",
-        "column": "pregnancy_id"
+      "id": "master_villages_to_blocks",
+      "description": "Link villages to blocks via LGD code",
+      "from": {
+        "table": "master_villages",
+        "column": "block_code_lgd"
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "mother_journeys",
-        "column": "pregnancy_id"
+      "to": {
+        "table": "master_blocks",
+        "column": "block_code_lgd"
       },
-      "enforced": true,
-      "note": "Each raw child record belongs to a mother journey. pregnancy_id may not be present in all records — use mother_id as the fallback join."
+      "cardinality": "many_to_one",
+      "join_quality": "exact"
     },
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "anc_visits",
-        "column": "mother_id"
+      "id": "master_hf_to_blocks",
+      "description": "Link health facilities to blocks",
+      "from": {
+        "table": "master_health_facilities",
+        "column": "block_code_lgd"
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "mother_journeys",
-        "column": "mother_id"
+      "to": {
+        "table": "master_blocks",
+        "column": "block_code_lgd"
       },
-      "enforced": false,
-      "note": "A mother can have multiple pregnancies, so mother_id is not unique in mother_journeys. This join returns ANC visits across all pregnancies of a mother. To focus on a specific pregnancy, filter by pregnancy_id or registration date."
+      "cardinality": "many_to_one",
+      "join_quality": "exact"
     },
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "raw_anc_records",
-        "column": "mother_id"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "mother_journeys",
-        "column": "mother_id"
-      },
-      "enforced": false,
-      "note": "Join raw ANC records to the mother journey via mother_id when pregnancy_id is not available."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "raw_child_records",
-        "column": "mother_id"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "mother_journeys",
-        "column": "mother_id"
-      },
-      "enforced": false,
-      "note": "Join raw child records to the mother journey via mother_id when pregnancy_id is not available."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
+      "id": "village_indicators_to_master_blocks",
+      "description": "Link monthly indicators to blocks for aggregation",
+      "from": {
         "table": "village_indicators_monthly",
         "column": "block_code_lgd"
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
+      "to": {
         "table": "master_blocks",
         "column": "block_code_lgd"
       },
-      "enforced": false,
-      "note": "Join monthly village health indicators to the block reference for geographic hierarchy and block name."
+      "cardinality": "many_to_one",
+      "join_quality": "exact"
     },
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "districts",
-        "column": "lgd_statecode"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "states",
-        "column": "lgd_statecode"
-      },
-      "enforced": true,
-      "note": "Geographic hierarchy: each district belongs to the Meghalaya state."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "subdistricts",
-        "column": "lgd_districtcode"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "districts",
-        "column": "lgd_districtcode"
-      },
-      "enforced": true,
-      "note": "Geographic hierarchy: each sub-district (block) belongs to a district."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "villages_poly",
-        "column": "lgd_subdistrictcode"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "subdistricts",
-        "column": "lgd_subdistrictcode"
-      },
-      "enforced": true,
-      "note": "Geographic hierarchy: each village boundary polygon belongs to a sub-district (block)."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "villages_poly",
-        "column": "lgd_districtcode"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "districts",
-        "column": "lgd_districtcode"
-      },
-      "enforced": true,
-      "note": "Geographic hierarchy: each village boundary polygon belongs to a district."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "villages_point",
-        "column": "lgd_subdistrictcode"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "subdistricts",
-        "column": "lgd_subdistrictcode"
-      },
-      "enforced": true,
-      "note": "Geographic hierarchy: each village GPS point belongs to a sub-district (block)."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "villages_point",
-        "column": "lgd_districtcode"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "districts",
-        "column": "lgd_districtcode"
-      },
-      "enforced": true,
-      "note": "Geographic hierarchy: each village GPS point belongs to a district."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_blocks",
+      "id": "village_indicators_to_master_districts",
+      "description": "Link monthly indicators to districts for aggregation",
+      "from": {
+        "table": "village_indicators_monthly",
         "column": "district_code_lgd"
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
+      "to": {
         "table": "master_districts",
         "column": "district_code_lgd"
       },
-      "enforced": true,
-      "note": "Each block belongs to a district. Use to roll up block-level health data to district level."
+      "cardinality": "many_to_one",
+      "join_quality": "exact"
     },
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_villages",
-        "column": "block_code_lgd"
+      "id": "anganwadi_to_blocks",
+      "description": "Link AWCs to blocks",
+      "from": {
+        "table": "anganwadi_centres",
+        "column": "block_code"
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
+      "to": {
         "table": "master_blocks",
         "column": "block_code_lgd"
       },
-      "enforced": true,
-      "note": "Each village belongs to a block."
+      "cardinality": "many_to_one",
+      "join_quality": "requires_cast",
+      "notes": "block_code may need BIGINT cast"
     },
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_villages",
-        "column": "district_code_lgd"
+      "id": "health_facilities_to_blocks",
+      "description": "Link health facilities to blocks",
+      "from": {
+        "table": "health_facilities",
+        "column": "block_code"
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_districts",
-        "column": "district_code_lgd"
-      },
-      "enforced": true,
-      "note": "Each village belongs to a district. Allows district-level aggregation of village data without joining through blocks."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_health_facilities",
-        "column": "block_code_lgd"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
+      "to": {
         "table": "master_blocks",
         "column": "block_code_lgd"
       },
-      "enforced": true,
-      "note": "Each health facility is located within a block."
+      "cardinality": "many_to_one",
+      "join_quality": "requires_cast"
     },
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_health_facilities",
-        "column": "district_code_lgd"
+      "id": "mother_journeys_by_geography",
+      "description": "Mother journeys linked by district/block TEXT names",
+      "from": {
+        "table": "mother_journeys",
+        "columns": [
+          "district",
+          "block"
+        ]
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_districts",
-        "column": "district_code_lgd"
-      },
-      "enforced": true,
-      "note": "Each health facility is located within a district."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_districts",
-        "column": "district_code_lgd"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "districts",
-        "column": "lgd_districtcode"
-      },
-      "enforced": true,
-      "note": "Links the canonical district reference to the corresponding district boundary. Use when you need health or master data alongside the geographic boundary for spatial analysis."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
+      "to": {
         "table": "master_blocks",
-        "column": "district_code_lgd"
+        "columns": [
+          "district_name",
+          "block_name"
+        ]
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "districts",
-        "column": "lgd_districtcode"
-      },
-      "enforced": true,
-      "note": "Links each block to its parent district boundary for spatial analysis."
+      "cardinality": "many_to_one",
+      "join_quality": "fuzzy_text",
+      "notes": "Text-based join; use UPPER(TRIM()) for matching"
     },
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_villages",
-        "column": "district_code_lgd"
+      "id": "anc_visits_by_geography",
+      "description": "ANC visits linked by district/block TEXT names",
+      "from": {
+        "table": "anc_visits",
+        "columns": [
+          "district",
+          "block"
+        ]
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "districts",
-        "column": "lgd_districtcode"
+      "to": {
+        "table": "master_blocks",
+        "columns": [
+          "district_name",
+          "block_name"
+        ]
       },
-      "enforced": true,
-      "note": "Links each village to its parent district boundary for spatial analysis."
+      "cardinality": "many_to_one",
+      "join_quality": "fuzzy_text"
     },
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_health_facilities",
-        "column": "district_code_lgd"
+      "id": "raw_pregnancy_to_mother_journeys",
+      "description": "Raw pregnancy records to processed mother journeys",
+      "from": {
+        "table": "raw_pregnancy_records",
+        "column": "pregnancy_id"
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "districts",
-        "column": "lgd_districtcode"
+      "to": {
+        "table": "mother_journeys",
+        "column": "pregnancy_id"
       },
-      "enforced": true,
-      "note": "Links each health facility to its parent district boundary for spatial analysis."
+      "cardinality": "one_to_one",
+      "join_quality": "exact"
     },
     {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
+      "id": "nfhs_by_district",
+      "description": "NFHS indicators by district name (text match)",
+      "from": {
+        "table": "nfhs_indicators",
+        "column": "district"
+      },
+      "to": {
+        "table": "master_districts",
+        "column": "district_name"
+      },
+      "cardinality": "many_to_one",
+      "join_quality": "fuzzy_text",
+      "notes": "NFHS district names may differ slightly; normalize before join"
+    },
+    {
+      "id": "geo_full_mapping_to_districts",
+      "description": "Full mapping table for cross-level navigation",
+      "from": {
         "table": "geo_full_mapping",
         "column": "district_code_lgd"
       },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "districts",
-        "column": "lgd_districtcode"
+      "to": {
+        "table": "master_districts",
+        "column": "district_code_lgd"
       },
-      "enforced": true,
-      "note": "Links the geographic hierarchy mapping to the district boundary. Some rows have no district code."
-    },
-    {
-      "child": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "master_villages",
-        "column": "village_code_lgd"
-      },
-      "parent": {
-        "type": "alloydb",
-        "dataset": "mecdm_superapp_db",
-        "table": "villages_point",
-        "column": "lgd_villagecode"
-      },
-      "enforced": false,
-      "note": "Matched villages get their geographic location from the village GPS points table. Villages without a matched LGD code use the block centroid as a location fallback."
+      "cardinality": "many_to_one",
+      "join_quality": "exact",
+      "notes": "Use geo_full_mapping for hierarchical drill-down queries"
     }
-  ]
+  ],
+  "known_data_quality_issues": {
+    "geography_master": {
+      "description": "Multiple ontologies exist - LGD, ICDS, Poshan Tracker use different codes",
+      "affected_tables": [
+        "master_blocks",
+        "master_villages",
+        "anganwadi_centres"
+      ],
+      "mitigation": "Always use LGD codes (district_code_lgd, block_code_lgd) as canonical identifiers"
+    },
+    "awc_identity": {
+      "description": "No single AWC identifier across systems; Poshan 11-digit code is most reliable",
+      "affected_tables": [
+        "anganwadi_centres"
+      ],
+      "mitigation": "Use name+block+district composite for matching when IDs unavailable"
+    },
+    "text_geography_fields": {
+      "description": "mother_journeys and anc_visits use TEXT district/block names, not LGD codes",
+      "affected_tables": [
+        "mother_journeys",
+        "anc_visits"
+      ],
+      "mitigation": "Use UPPER(TRIM()) for text matching; prefer village_indicators_monthly for aggregations"
+    }
+  },
+  "recommended_join_paths": {
+    "village_level_aggregation": {
+      "use_table": "village_indicators_monthly",
+      "reason": "Pre-aggregated monthly counts; avoids expensive joins on raw records"
+    },
+    "district_comparison": {
+      "path": [
+        "village_indicators_monthly",
+        "→",
+        "master_districts"
+      ],
+      "join_on": "district_code_lgd"
+    },
+    "facility_coverage": {
+      "path": [
+        "master_health_facilities",
+        "→",
+        "master_blocks",
+        "→",
+        "master_districts"
+      ],
+      "join_on": [
+        "block_code_lgd",
+        "district_code_lgd"
+      ]
+    }
+  }
 }

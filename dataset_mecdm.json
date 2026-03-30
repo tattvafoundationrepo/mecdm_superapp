@@ -1,0 +1,106 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "description": "MECDM SuperApp Dataset Configuration",
+    "last_updated": "2026-03-30",
+    "maintainer": "Tattva Foundation"
+  },
+  "datasets": [
+    {
+      "name": "mecdm_alloydb",
+      "type": "alloydb",
+      "description": "MECDM unified database containing maternal and child health data, geographic hierarchies, infrastructure locations, and reference datasets for Meghalaya's Early Childhood Development Mission.",
+      "connection": {
+        "env_prefix": "ALLOYDB_POSTGRES",
+        "ssl_mode": "require"
+      },
+      "domains": [
+        {
+          "name": "geographic",
+          "description": "Administrative boundaries and geographic hierarchies from Census 2011 and LGD",
+          "tables": [
+            "states",
+            "districts",
+            "district_boundaries",
+            "subdistricts",
+            "blocks",
+            "villages_poly",
+            "villages_point"
+          ]
+        },
+        {
+          "name": "master_reference",
+          "description": "Canonical reference tables linking LGD codes across systems",
+          "tables": [
+            "master_districts",
+            "master_blocks",
+            "master_villages",
+            "master_health_facilities",
+            "geo_full_mapping",
+            "geo_match_report",
+            "meghealth_geo_mapping"
+          ]
+        },
+        {
+          "name": "infrastructure",
+          "description": "Health facilities and Anganwadi centres with GPS coordinates",
+          "tables": [
+            "health_facilities",
+            "anganwadi_centres"
+          ]
+        },
+        {
+          "name": "health_data",
+          "description": "Core maternal and child health tracking data",
+          "tables": [
+            "mother_journeys",
+            "anc_visits",
+            "village_indicators_monthly"
+          ]
+        },
+        {
+          "name": "raw_records",
+          "description": "Unprocessed Meghealth API responses preserved for audit",
+          "tables": [
+            "raw_anc_records",
+            "raw_child_records",
+            "raw_pregnancy_records"
+          ]
+        },
+        {
+          "name": "reference",
+          "description": "NFHS indicators, educational content, and research resources",
+          "tables": [
+            "nfhs_indicators",
+            "video_library",
+            "research_articles"
+          ]
+        }
+      ],
+      "stats_eligible_tables": [
+        "village_indicators_monthly",
+        "mother_journeys",
+        "anc_visits",
+        "anganwadi_centres",
+        "health_facilities",
+        "master_villages",
+        "master_blocks",
+        "master_districts"
+      ],
+      "privacy_restricted_columns": [
+        "mother_id",
+        "pregnancy_id",
+        "mother_name",
+        "phone",
+        "address",
+        "gps_location"
+      ]
+    }
+  ],
+  "global_settings": {
+    "default_result_limit": 1000,
+    "max_result_limit": 10000,
+    "require_where_filters": true,
+    "privacy_mode": "aggregate_only"
+  }
+}
