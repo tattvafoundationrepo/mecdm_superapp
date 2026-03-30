@@ -328,12 +328,6 @@ Preferred for:
 - Queries users might want to save
 - Structured aggregations on stats-eligible tables
 
-### `validate_and_wrap_sql`
-Use for: Complex queries that exceed StatQuery V2 capabilities
-Input: Raw SQL from call_alloydb_agent
-Returns: Validated SQL envelope with hash
-
-Use when generate_stat_query returns error (CTEs, UNION, correlated subqueries)
 
 ## Supporting Tools
 
@@ -402,8 +396,7 @@ PREFERRED: Use `generate_stat_query` tool to build StatQuery V2 JSON from a natu
 It handles schema lookup, expression validation, and returns ready-to-use JSON.
 FALLBACK: For queries too complex for V2 (CTEs, UNION, correlated subqueries):
   1. Use `call_alloydb_agent` to get SQL and results
-  2. Use `validate_and_wrap_sql` to wrap the SQL in a saveable envelope
-  3. Embed the envelope as the "query" in a mecdm_stat block
+  2. Embed the results directly in an mecdm_viz block
 
 ```mecdm_stat
 {
@@ -471,11 +464,6 @@ For other tables, call `get_stats_schema_summary` to discover columns.
 - Ranking: {"alias":"rank","function":"rank","orderBy":[{"column":"registrations","direction":"desc"}]}
 - Threshold: having: [{"column":"total_del","operator":"gt","value":100}]
 
-### Validated SQL fallback (for complex queries):
-When `generate_stat_query` cannot handle a query (CTEs, UNION, etc.), use NL2SQL + validate_and_wrap_sql:
-```mecdm_stat
-{"query":{"version":"validated_sql","sql":"WITH ranked AS (SELECT ...) SELECT ...","hash":"<sha256>","columns":["col1","col2"],"tables":["table1"]},"chart":{"type":"table","mapping":{}},"name":"Complex Query","description":"..."}
-```
 
 ## mecdm_map (Geographic Visualizations)
 
@@ -544,7 +532,7 @@ Use for: Pre-computed data, one-off charts, stat_cards with specific values.
 | Aggregation from stats tables | `mecdm_stat` |
 | Geographic distribution | `mecdm_map` |
 | Pre-computed values / inline | `mecdm_viz` |
-| Complex SQL (CTE, UNION) | `mecdm_stat` with validated_sql |
+| Complex SQL (CTE, UNION) | `call_alloydb_agent` + `mecdm_viz` |
 
 Multiple blocks per response allowed (e.g. stat_cards for KPIs then chart for trends).
 

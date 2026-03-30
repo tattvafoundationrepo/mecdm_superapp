@@ -1,6 +1,5 @@
 """Tools for the ADK Samples Data Science Agent."""
 
-import hashlib
 import json
 import logging
 import os
@@ -690,45 +689,3 @@ async def generate_stat_query(
         logger.error("generate_stat_query error: %s", e)
         return f"Error: {e}"
 
-
-async def validate_and_wrap_sql(
-    sql: str,
-    columns: list[str],
-    tables: list[str],
-    tool_context: ToolContext,
-) -> str:
-    """Wrap a validated SQL query in a ValidatedSqlQuery envelope for dashboard saving.
-
-    Use this ONLY after call_alloydb_agent returns results for a complex query
-    that could NOT be expressed as StatQuery V2 (e.g., queries with CTEs, UNION,
-    correlated subqueries, or complex CASE expressions).
-
-    The returned JSON envelope can be embedded in an mecdm_stat block and saved
-    to the dashboard.
-
-    Args:
-        sql: The SQL SELECT query to wrap (must already be verified as working).
-        columns: List of output column names from the query results.
-        tables: List of table names referenced by the query.
-
-    Returns:
-        A ValidatedSqlQuery JSON string, or an error message if validation fails.
-    """
-    from .app_utils.sql_validator import validate_sql
-
-    is_safe, reason = validate_sql(sql)
-    if not is_safe:
-        return f"Error: SQL validation failed — {reason}"
-
-    sql_hash = hashlib.sha256(sql.encode()).hexdigest()
-
-    envelope = {
-        "version": "validated_sql",
-        "sql": sql,
-        "hash": sql_hash,
-        "columns": columns,
-        "tables": tables,
-    }
-
-    tool_context.state["validated_sql_query"] = envelope
-    return json.dumps(envelope)
