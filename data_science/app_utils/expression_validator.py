@@ -170,6 +170,8 @@ def validate_computed_columns(
         Tuple of (is_safe, reason).
     """
     seen_aliases: Set[str] = set()
+    # Copy so we can grow it as each computed column is validated
+    allowed = set(allowed_columns)
     for col in columns:
         alias = col.get("alias", "")
         expr = col.get("expression", "")
@@ -181,8 +183,11 @@ def validate_computed_columns(
             return False, f'Duplicate computed column alias: "{alias}"'
         seen_aliases.add(alias)
 
-        is_safe, reason = validate_expression(expr, allowed_columns)
+        is_safe, reason = validate_expression(expr, allowed)
         if not is_safe:
             return False, f'Computed column "{alias}": {reason}'
+
+        # Make this alias available for subsequent computed columns
+        allowed.add(alias)
 
     return True, "OK"
