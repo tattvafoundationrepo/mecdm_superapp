@@ -567,7 +567,7 @@ Available tables and their columns (choose the best table for the question):
 StatQuery V2 format:
 {{
   "version": 2,
-  "source": {{ "table": "<table_name>", "joins": [{{ "table": "<t>", "on": {{ "left": "<col>", "right": "<col>" }}, "type": "inner"|"left"|"right" }}] }},
+  "source": {{ "table": "<table_name>", "joins": [{{ "table": "<t>", "on": {{ "left": "<col>", "right": "<col>" }}, "type": "inner"|"left"|"right", "caseInsensitive": true|false }}] }},
   "dimensions": [{{ "column": "<col>", "alias": "<display_name>", "transform": "date_trunc_month"|"date_trunc_quarter"|"date_trunc_year" }}],
   "measures": [{{ "column": "<col>", "aggregate": "count"|"sum"|"avg"|"min"|"max"|"count_distinct", "alias": "<name>" }}],
   "computedColumns": [{{ "alias": "<name>", "expression": "<safe expression referencing measure aliases>" }}],
@@ -590,6 +590,8 @@ Rules:
 - In mother_journeys/anc_visits, ALL columns are TEXT — cast with CAST(col AS numeric) in computedColumns if needed
 - District names in mother_journeys/anc_visits are UPPERCASE (e.g., 'EAST KHASI HILLS')
 - Use integer code joins (district_code_lgd, block_code_lgd) over name joins
+- IMPORTANT: When joining by name across tables with different casing (UPPERCASE vs Title Case), set "caseInsensitive": true on the join. This applies to ANY join between village_indicators_monthly/mother_journeys (UPPERCASE) and nfhs_indicators/master_*/anganwadi_centres (Title Case).
+- anganwadi_centres.block_code is NOT the same as block_code_lgd. Use district_code for district-level joins or name joins with caseInsensitive: true.
 
 Common patterns:
 - IDR: {{"alias":"idr","expression":"inst_del * 100.0 / NULLIF(total_del, 0)"}}
