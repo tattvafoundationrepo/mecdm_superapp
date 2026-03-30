@@ -86,7 +86,7 @@ async def call_analytics_agent(
   Do NOT generate matplotlib plots or images. The frontend will render charts from your JSON data.
   """
 
-    from .sub_agents import analytics_agent
+    from .sub_agents.analytics.agent import analytics_agent
 
     agent_tool = AgentTool(agent=analytics_agent)
 
@@ -672,6 +672,10 @@ async def generate_stat_query(
             for m in query.get("measures", []):
                 allowed_cols.add(m.get("alias", m.get("column", "")))
                 allowed_cols.add(m.get("column", ""))
+            # Include window function aliases so computed columns can reference them
+            for w in query.get("windows", []):
+                if w.get("alias"):
+                    allowed_cols.add(w["alias"])
 
             is_safe, reason = validate_computed_columns(
                 query["computedColumns"], allowed_cols
