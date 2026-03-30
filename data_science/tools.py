@@ -296,16 +296,60 @@ async def find_nearest_facilities(
     return f"Include this map in your response:\n\n{map_block}"
 
 
-STATS_ALLOWLISTED_TABLES = [
-    "village_indicators_monthly",
-    "mother_journeys",
-    "anc_visits",
-    "master_districts",
-    "master_blocks",
-    "master_health_facilities",
-    "anganwadi_centres",
-    "nfhs_indicators",
-]
+def _get_stats_blocked_tables() -> set[str]:
+    """Get blocked tables from dataset config."""
+    from .prompts.prompt_builder import load_dataset_config
+
+    return set(load_dataset_config().stats_blocked_tables)
+
+
+STATS_BLOCKED_TABLES = _get_stats_blocked_tables()
+
+# Cached list of available (non-blocked) tables, populated on first call to MCP
+_stats_available_tables: list[str] | None = None
+
+
+def get_stats_available_tables() -> list[str]:
+    """Fetch all tables from MCP Toolbox, exclude blocked ones, cache the result."""
+    global _stats_available_tables
+    if _stats_available_tables is not None:
+        return _stats_available_tables
+
+    try:
+        list_tables_tool = get_toolbox_client().load_tool("list_tables")
+        raw_schema = list_tables_tool(schema_names="public", table_names="")
+
+        all_tables: list[str] = []
+        if isinstance(raw_schema, str):
+            import json as _json
+            try:
+                tables_data = _json.loads(raw_schema)
+            except _json.JSONDecodeError:
+                tables_data = []
+        else:
+            tables_data = raw_schema
+
+        if isinstance(tables_data, list):
+            for t in tables_data:
+                name = t.get("table_name") or t.get("name", "")
+                if name:
+                    all_tables.append(name)
+        elif isinstance(tables_data, dict):
+            all_tables = list(tables_data.keys())
+
+        _stats_available_tables = [
+            t for t in all_tables if t not in STATS_BLOCKED_TABLES
+        ]
+        logger.info(
+            "Discovered %d stats-available tables (blocked %d)",
+            len(_stats_available_tables),
+            len(all_tables) - len(_stats_available_tables),
+        )
+        return _stats_available_tables
+
+    except Exception as e:
+        logger.error("Failed to fetch tables from MCP: %s", e)
+        return []
 
 PREDEFINED_STATS_CATALOG = [
     {"id": "total-registrations", "name": "Total Registrations", "category": "maternal-health", "description": "Total maternal registrations across all districts"},
@@ -352,28 +396,32 @@ async def get_stats_schema_summary(tool_context: ToolContext) -> str:
         JSON string with table schemas in StatQuery-compatible format.
     """
     try:
+        available_tables = get_stats_available_tables()
+        if not available_tables:
+            return "Error: No stats-available tables found. Check MCP Toolbox connection."
+
         list_tables_tool = get_toolbox_client().load_tool("list_tables")
-        table_names = ",".join(STATS_ALLOWLISTED_TABLES)
-        raw_schema = list_tables_tool(schema_names="public", table_names=table_names)
+        table_names_str = ",".join(available_tables)
+        raw_schema = list_tables_tool(schema_names="public", table_names=table_names_str)
 
         # Parse the raw schema output into a structured format
-        # The list_tables tool returns JSON with table details
         if isinstance(raw_schema, str):
             import json as _json
             try:
                 tables_data = _json.loads(raw_schema)
             except _json.JSONDecodeError:
-                # Raw text output — return it with instructions
-                return f"Stats-eligible tables: {table_names}\n\nRaw schema:\n{raw_schema[:4000]}"
+                return f"Available tables: {table_names_str}\n\nRaw schema:\n{raw_schema[:4000]}"
         else:
             tables_data = raw_schema
+
+        available_set = set(available_tables)
 
         # Build condensed schema summary
         summary = {}
         if isinstance(tables_data, list):
             for table_info in tables_data:
                 tname = table_info.get("table_name") or table_info.get("name", "")
-                if tname not in STATS_ALLOWLISTED_TABLES:
+                if tname not in available_set:
                     continue
                 columns = []
                 for col in table_info.get("columns", []):
@@ -385,9 +433,8 @@ async def get_stats_schema_summary(tool_context: ToolContext) -> str:
                 if columns:
                     summary[tname] = {"columns": columns}
         elif isinstance(tables_data, dict):
-            # Handle dict format where keys are table names
             for tname, tinfo in tables_data.items():
-                if tname not in STATS_ALLOWLISTED_TABLES:
+                if tname not in available_set:
                     continue
                 columns = []
                 for col in (tinfo.get("columns", []) if isinstance(tinfo, dict) else []):
@@ -400,8 +447,7 @@ async def get_stats_schema_summary(tool_context: ToolContext) -> str:
                     summary[tname] = {"columns": columns}
 
         if not summary:
-            # Fallback: return table names and raw output
-            return f"Stats-eligible tables: {table_names}\n\nSchema data format not recognized. Raw:\n{str(tables_data)[:3000]}"
+            return f"Available tables: {table_names_str}\n\nSchema data format not recognized. Raw:\n{str(tables_data)[:3000]}"
 
         return json.dumps(summary, indent=2)
 
@@ -515,7 +561,7 @@ def _get_v2_llm_client():
 
 _STAT_QUERY_V2_PROMPT = """Generate a StatQuery V2 JSON object for this health data question.
 
-Schema (stats-eligible tables and their columns):
+Available tables and their columns (choose the best table for the question):
 {SCHEMA}
 
 StatQuery V2 format:
@@ -535,7 +581,7 @@ StatQuery V2 format:
 
 Rules:
 - version MUST be 2 (integer, not string)
-- source.table must be one of the stats-eligible tables
+- source.table must be one of the tables shown in the schema above
 - dimensions/measures columns must exist in the table schema
 - computedColumns expressions can ONLY reference measure/dimension aliases, arithmetic (+,-,*,/), numeric literals, COALESCE, NULLIF, ROUND, CEIL, FLOOR, ABS, GREATEST, LEAST, CAST, and CASE WHEN
 - having filters apply to measure aliases (post-aggregation)
@@ -606,10 +652,13 @@ async def generate_stat_query(
         if query.get("version") != 2:
             query["version"] = 2
 
-        # Validate table
+        # Validate table is not blocked
         table = query.get("source", {}).get("table", "")
-        if table not in STATS_ALLOWLISTED_TABLES:
-            return f"Error: Table '{table}' is not in the stats-eligible tables: {STATS_ALLOWLISTED_TABLES}"
+        if table in STATS_BLOCKED_TABLES:
+            return f"Error: Table '{table}' is blocked from stats queries."
+        available = get_stats_available_tables()
+        if available and table not in available:
+            return f"Error: Table '{table}' not found. Available tables: {available}"
 
         # Validate computed columns if present
         if query.get("computedColumns"):

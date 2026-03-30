@@ -77,15 +77,22 @@
           ]
         }
       ],
-      "stats_eligible_tables": [
-        "village_indicators_monthly",
-        "mother_journeys",
-        "anc_visits",
-        "anganwadi_centres",
-        "health_facilities",
-        "master_villages",
-        "master_blocks",
-        "master_districts"
+      "stats_blocked_tables": [
+        "raw_anc_records",
+        "raw_child_records",
+        "raw_pregnancy_records",
+        "geo_full_mapping",
+        "geo_match_report",
+        "meghealth_geo_mapping",
+        "states",
+        "districts",
+        "district_boundaries",
+        "subdistricts",
+        "blocks",
+        "villages_poly",
+        "villages_point",
+        "video_library",
+        "research_articles"
       ],
       "privacy_restricted_columns": [
         "mother_id",

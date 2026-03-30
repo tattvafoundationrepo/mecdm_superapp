@@ -1,25 +1,46 @@
-"""Top level agent for data agent multi-agents.
+"""
+MECDM Insight Agent - Refined Architecture
 
--- it get data from database (e.g., BQ) using NL2SQL
--- then, it use NL2Py to do further data analysis as needed
+This agent provides health intelligence for Meghalaya's Early Childhood
+Development Mission, supporting decision makers with data-driven insights.
+
+Key Features:
+- Modular prompt system loaded from configuration
+- Cross-dataset relations awareness
+- MCP Toolbox integration for AlloyDB access
+- Privacy-first design with aggregation enforcement
+- Multi-persona support (Decision Maker, Frontline Worker, Citizen, Analyst)
+
+Environment Variables:
+    DATASET_CONFIG_FILE: Path to datasets.json
+    CROSS_DATASET_RELATIONS_DEFS: Path to cross_dataset_relations.json (optional)
+    ROOT_AGENT_MODEL: Model name (default: gemini-2.5-flash)
+    AGENT_PERSONA: Persona type (decision_maker|frontline_worker|citizen|analyst)
 """
 
-import base64
-import json
 import logging
 import os
-from datetime import date
+from typing import Optional, Dict, Any
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.apps import App
 from google.adk.tools import google_search
-# from google.adk.tools import load_artifacts
 from google.genai import types
 
-from .prompts import return_instructions_root
-from .sub_agents.alloydb.tools import \
-    get_database_settings as get_alloydb_database_settings
+from .prompts.prompt_builder import (
+    PromptConfig,
+    Persona,
+    DatasetConfig,
+    RelationsConfig,
+    load_dataset_config,
+    load_relations_config,
+    build_root_instruction,
+    build_global_instruction,
+)
+from .sub_agents.alloydb.tools import (
+    get_database_settings as get_alloydb_database_settings,
+)
 from .tools import (
     call_alloydb_agent,
     call_analytics_agent,
@@ -35,105 +56,137 @@ from .tools import (
     validate_and_wrap_sql,
 )
 
-# Set up logging
-# Note this level can be overridden by adk web on the command line;
-# e.g. running `adk web --log_level DEBUG` or `adk web -v`
 logging.basicConfig(level=logging.INFO)
-_logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-# Initialize module-level config variables
-_dataset_config = {}
-_database_settings = {}
 _supported_dataset_types = ["alloydb"]
-_required_dataset_config_params = ["name", "description"]
 
 
-def load_dataset_config():
-    """Load the dataset configurations for the agent from the config file"""
+# ============================================================================
+# Configuration
+# ============================================================================
 
-    dataset_config_file = os.getenv("DATASET_CONFIG_FILE", "")
-    if not dataset_config_file:
-        _logger.fatal("DATASET_CONFIG_FILE env var not set")
+class AgentConfiguration:
+    """Centralized agent configuration manager."""
 
-    with open(dataset_config_file, encoding="utf-8") as f:
-        dataset_config = json.load(f)
+    def __init__(self):
+        self.dataset_config: Optional[DatasetConfig] = None
+        self.relations_config: Optional[RelationsConfig] = None
+        self.database_settings: Dict[str, Any] = {}
+        self.db_schema: str = ""
+        self._raw_dataset_config: Dict[str, Any] = {}
+        self._initialized = False
 
-    if "datasets" not in dataset_config:
-        _logger.fatal("No 'datasets' entry in dataset config")
+    def initialize(self):
+        """Load all configurations. Call once at startup."""
+        if self._initialized:
+            return
 
-    for dataset in dataset_config["datasets"]:
-        if "type" not in dataset:
-            _logger.fatal("Missing dataset type")
-        if dataset["type"] not in _supported_dataset_types:
-            _logger.fatal("Dataset type '%s' not supported", dataset["type"])
+        logger.info("Initializing MECDM Agent Configuration...")
 
-        for p in _required_dataset_config_params:
-            if p not in dataset:
-                _logger.fatal(
-                    "Missing required param '%s' from %s dataset config",
-                    p,
-                    dataset["type"],
-                )
+        # Load dataset configuration
+        dataset_config_file = os.getenv("DATASET_CONFIG_FILE", "")
+        if not dataset_config_file:
+            logger.fatal("DATASET_CONFIG_FILE env var not set")
+            raise ValueError("DATASET_CONFIG_FILE env var not set")
 
-    return dataset_config
+        self.dataset_config = load_dataset_config(dataset_config_file)
+        self._raw_dataset_config = self.dataset_config.raw_config
+        logger.info("Loaded dataset config: %s", self.dataset_config.name)
+
+        # Validate dataset types
+        for dataset in self._raw_dataset_config.get("datasets", []):
+            if dataset.get("type") not in _supported_dataset_types:
+                logger.fatal("Dataset type '%s' not supported", dataset.get("type"))
+
+        # Load cross-dataset relations
+        relations_file = os.getenv("CROSS_DATASET_RELATIONS_DEFS")
+        self.relations_config = load_relations_config(relations_file)
+        logger.info("Loaded %d relations", len(self.relations_config.relations))
+
+        # Load database settings and schema
+        self._init_database_settings()
+
+        self._initialized = True
+
+    def _init_database_settings(self):
+        """Initialize database settings for configured datasets."""
+        for dataset in self._raw_dataset_config.get("datasets", []):
+            if dataset["type"] == "alloydb":
+                try:
+                    settings = get_alloydb_database_settings()
+                    self.database_settings[dataset["type"]] = settings
+                    self.db_schema = settings.get("schema", "")
+                    logger.info("Loaded database schema from AlloyDB")
+                except Exception as e:
+                    logger.warning("Could not load database schema: %s", e)
+
+    def get_persona(self) -> Persona:
+        """Get persona from environment or default to decision maker."""
+        persona_str = os.getenv("AGENT_PERSONA", "decision_maker").lower()
+        try:
+            return Persona(persona_str)
+        except ValueError:
+            logger.warning("Invalid persona '%s'; using decision_maker", persona_str)
+            return Persona.DECISION_MAKER
+
+    def build_prompt_config(self) -> PromptConfig:
+        """Build prompt configuration based on environment."""
+        return PromptConfig(
+            persona=self.get_persona(),
+            include_schema=bool(self.db_schema),
+            include_relations=bool(
+                self.relations_config and self.relations_config.relations
+            ),
+            include_domain_knowledge=True,
+            include_visualization_guide=True,
+            strict_privacy=os.getenv("STRICT_PRIVACY", "true").lower() == "true",
+        )
 
 
-def get_database_settings(db_type: str) -> dict:
-    """Wrapper function to get database settings by type"""
-    assert db_type in _supported_dataset_types
-    return get_alloydb_database_settings()
+# Global configuration instance
+_config = AgentConfiguration()
 
 
-def init_database_settings(dataset_config: dict) -> dict:
-    """Initializes the database settings for the configured datasets"""
-    db_settings = {}
-    for dataset in dataset_config["datasets"]:
-        db_settings[dataset["type"]] = get_database_settings(dataset["type"])
-    return db_settings
-
-
-def get_dataset_definitions_for_instructions() -> str:
-    """Returns the dataset definitions instructions block"""
-
-    dataset_definitions = """
-<DATASETS>
-"""
-    for dataset in _dataset_config["datasets"]:
-        dataset_type = dataset["type"]
-        dataset_definitions += f"""
-<{dataset_type.upper()}>
-<DESCRIPTION>
-{dataset["description"]}
-</DESCRIPTION>
-<SCHEMA>
---------- The schema of the relevant database with a few sample rows. --------
-{_database_settings[dataset_type]["schema"]}
-</SCHEMA>
-</{dataset_type.upper()}>
-
-"""
-    dataset_definitions += """
-</DATASETS>
-"""
-
-    if "cross_dataset_relations" in _dataset_config:
-        dataset_definitions += f"""
-<CROSS_DATASET_RELATIONS>
---------- The cross dataset relations between the configured datasets. ---------
-{_dataset_config["cross_dataset_relations"]}
-</CROSS_DATASET_RELATIONS>
-"""
-
-    return dataset_definitions
-
+# ============================================================================
+# Callback Handlers
+# ============================================================================
 
 def load_database_settings_in_context(callback_context: CallbackContext):
     """Load database settings into the callback context on first use."""
     if "database_settings" not in callback_context.state:
-        callback_context.state["database_settings"] = _database_settings
+        callback_context.state["database_settings"] = _config.database_settings
 
 
-def get_root_agent() -> LlmAgent:
+# ============================================================================
+# Agent Factory
+# ============================================================================
+
+def create_root_agent() -> LlmAgent:
+    """
+    Factory function to create the configured root agent.
+
+    Returns:
+        Configured LlmAgent instance
+    """
+    # Build prompt configuration
+    prompt_config = _config.build_prompt_config()
+
+    # Build the instruction prompt
+    instruction = build_root_instruction(
+        config=prompt_config,
+        dataset=_config.dataset_config,
+        relations=_config.relations_config,
+        db_schema=_config.db_schema,
+    )
+
+    logger.info(
+        "Built instruction prompt: %d chars, persona=%s",
+        len(instruction),
+        prompt_config.persona.value,
+    )
+
+    # Assemble tools list
     tools = [
         call_analytics_agent,
         find_nearest_facilities,
@@ -148,24 +201,19 @@ def get_root_agent() -> LlmAgent:
         get_predefined_stats_catalog,
         google_search,
     ]
-    sub_agents = []
-    for dataset in _dataset_config["datasets"]:
+
+    # Add dataset-specific tools
+    for dataset in _config._raw_dataset_config.get("datasets", []):
         if dataset["type"] == "alloydb":
             tools.append(call_alloydb_agent)
 
     agent = LlmAgent(
         model=os.getenv("ROOT_AGENT_MODEL", "gemini-2.5-flash"),
         name="data_science_root_agent",
-        instruction=return_instructions_root()
-        + get_dataset_definitions_for_instructions(),
-        global_instruction=(
-            f"""
-            You are a Data Science and Data Analytics Multi Agent System.
-            Todays date: {date.today()}
-            """
-        ),
-        sub_agents=sub_agents,  # type: ignore
-        tools=tools,  # type: ignore
+        instruction=instruction,
+        global_instruction=build_global_instruction(),
+        sub_agents=[],
+        tools=tools,
         before_agent_callback=load_database_settings_in_context,
         generate_content_config=types.GenerateContentConfig(temperature=0.01),
     )
@@ -173,13 +221,12 @@ def get_root_agent() -> LlmAgent:
     return agent
 
 
-# Initialize dataset configurations and database info before the agent starts
-_dataset_config = load_dataset_config()
-_database_settings = init_database_settings(_dataset_config)
+# ============================================================================
+# Module-Level Initialization
+# ============================================================================
 
+_config.initialize()
 
-# Fetch the root agent
-root_agent = get_root_agent()
-
+root_agent = create_root_agent()
 
 app = App(root_agent=root_agent, name="data_science")
