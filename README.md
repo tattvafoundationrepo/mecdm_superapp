@@ -40,7 +40,7 @@ The backend powers a conversational AI agent that lets users query maternal-chil
                  +------------------+------------------+
                  |                  |                  |
           AlloyDB Agent      Analytics Agent     Direct Tools
-          (NL2SQL)           (NL2Py)             (11 tools)
+          (NL2SQL)           (NL2Py)             (12 tools)
                  |                  |
           MCP Toolbox        Vertex AI Code
           execute_sql        Executor
@@ -56,18 +56,18 @@ The backend powers a conversational AI agent that lets users query maternal-chil
 
 ### Agent Hierarchy
 
-**Root Agent** orchestrates two specialized sub-agents via AgentTools:
+**Root Agent** orchestrates two specialized sub-agents via AgentTools, with multi-persona support (Decision Maker, Frontline Worker, Citizen, Analyst):
 
 - **AlloyDB Agent** -- translates natural language to PostgreSQL, executes queries via MCP Toolbox, returns tabular results
 - **Analytics Agent** -- takes query results, generates Python code for statistical analysis, returns structured JSON output
 
-### Root Agent Tools (11)
+### Root Agent Tools (12)
 
 | Tool | Purpose |
 |---|---|
 | `call_alloydb_agent` | Route data questions to the NL2SQL sub-agent |
 | `call_analytics_agent` | Route data for Python-based statistical analysis |
-| `generate_map_viz` | Create choropleth/bubble maps with PostGIS geometry joins |
+| `generate_stat_query` | Build StatQuery V2 JSON blocks for interactive frontend charts |
 | `find_nearest_facilities` | Spatial distance queries (nearest PHC/SC/CHC/DH/AWC) |
 | `search_policy_rag_engine` | Search Meghalaya Government policy documents |
 | `get_stats_schema_summary` | List stats-eligible tables and columns |
@@ -76,6 +76,7 @@ The backend powers a conversational AI agent that lets users query maternal-chil
 | `get_current_datetime` | Current date/time for relative queries |
 | `get_weather_data` | Current weather via Open-Meteo API |
 | `get_historical_weather_data` | Historical weather trends |
+| `google_search` | ADK built-in web search |
 
 ## Request Flow
 
@@ -94,12 +95,11 @@ The backend powers a conversational AI agent that lets users query maternal-chil
 **Map generation example** ("Show a map of institutional deliveries by district"):
 
 1. `call_alloydb_agent` retrieves metric data with join key (e.g., `district_code_lgd`)
-2. Root agent calls `generate_map_viz` with geography level and metric column
-3. Tool fetches PostGIS geometry via MCP Toolbox (`ST_AsGeoJSON`)
-4. Joins metric data to geometry on LGD codes
-5. Optionally fetches facility/AWC overlay data
-6. Returns GeoJSON + overlay structure as `mecdm_viz` block
-7. Frontend renders the interactive map
+2. Root agent emits an `mecdm_map` config block specifying geography level, metric column, and join key
+3. Frontend fetches PostGIS geometry via API (`ST_AsGeoJSON`)
+4. Frontend joins metric data to geometry on LGD codes
+5. Optionally includes facility/AWC overlay configuration
+6. Frontend renders the interactive choropleth/bubble map
 
 ## Visualization Output
 
@@ -107,11 +107,11 @@ The agent returns structured JSON blocks (not images) for the frontend to render
 
 | Block Type | Description |
 |---|---|
-| `mecdm_viz:chart` | Bar, line, pie, area charts |
-| `mecdm_viz:map` | Choropleth, bubble maps with facility/AWC overlays |
-| `mecdm_viz:stat_cards` | KPI cards with trends and colors |
+| `mecdm_stat` | StatQuery V2 -- structured query builder with source, dimensions, measures, computedColumns, filters, and chart config. Preferred for all aggregations. |
+| `mecdm_map` | Map config block -- specifies geography level, metric column, join key, map type (choropleth/bubble), and optional facility/AWC overlays. Frontend fetches geometry and renders. |
+| `mecdm_viz:chart` | Pre-computed bar, line, pie, area charts |
+| `mecdm_viz:stat_cards` | KPI cards with value, trend, and color |
 | `mecdm_viz:table` | Structured data tables |
-| `mecdm_stat` | Query builder for aggregations (8 allowlisted tables, 10 chart types, time-range presets) |
 
 ## Project Structure
 
@@ -120,9 +120,11 @@ backend/
 ├── main.py                              # Cloud Run entry point
 ├── data_science/
 │   ├── agent.py                         # Root agent definition, dataset config loading
-│   ├── prompts.py                       # Root agent system prompt (MCH domain knowledge)
-│   ├── tools.py                         # 11 root-level tools
+│   ├── tools.py                         # 12 root-level tools
 │   ├── fast_api_app.py                  # FastAPI app factory (production)
+│   │
+│   ├── prompts/
+│   │   └── prompt_builder.py            # Modular prompt system (Persona, PromptConfig, DatasetConfig)
 │   │
 │   ├── sub_agents/
 │   │   ├── alloydb/
@@ -142,22 +144,30 @@ backend/
 │   │   └── utils.py                     # General utilities
 │   │
 │   └── app_utils/
-│       ├── models.py                    # SQLAlchemy models (ChatSession, ChatMessage, Feedback, GoldenSql)
+│       ├── models.py                    # SQLAlchemy models (ChatSession, ChatMessage, Feedback, UserPreferences, GoldenSql)
 │       ├── sql_validator.py             # pglast-based SQL injection prevention
-│       ├── telemetry.py                 # OpenTelemetry + GCS telemetry
-│       ├── user_db.py                   # User DB session factory
+│       ├── expression_validator.py      # Expression validation
+│       ├── telemetry.py                 # OpenTelemetry + Google Cloud Logging
+│       ├── user_db.py                   # Async user DB session factory (asyncpg)
 │       └── typing.py                    # Type definitions
 │
-├── mecdm_superapp_config.json           # Dataset config (25 tables, cross-relations)
+├── dataset_mecdm.json                   # Dataset config (25 tables, domains, stats rules)
 ├── cross_dataset_relations.json         # 18 foreign key relationships
-├── dataset_schema.json                  # JSON Schema for config validation
 ├── pyproject.toml                       # Dependencies
 ├── Makefile                             # Dev, deploy, test commands
 ├── Dockerfile                           # Container build
+├── GEMINI.md                            # Developer guide
 ├── .env.example                         # Environment template
-├── tests/                               # Unit + integration tests
+├── migrate_mecdm.py                     # Data migration script
+├── toolbox-alloydb-local.yaml           # MCP Toolbox config (local)
+├── toolbox-alloydb-remote.yaml          # MCP Toolbox config (Cloud Run)
+├── tests/                               # Unit, integration, load, eval tests
 ├── eval/                                # Agent evaluation
-└── migrations/                          # Database migrations
+├── migrations/                          # Database migrations
+├── deployment/                          # Deploy automation (deploy.py, terraform/)
+├── infra/                               # Infrastructure config
+├── notebooks/                           # Jupyter notebooks (ADK testing, evaluation)
+└── .github/workflows/                   # CI/CD (pr_checks, staging, prod deploy)
 ```
 
 ## Data Schema
@@ -186,7 +196,8 @@ backend/
 - **SQL injection prevention** -- all generated SQL validated through `pglast` (PostgreSQL C parser) before execution.
 - **Spatial-first** -- PostGIS integration for geometry queries, facility proximity, and map generation as first-class features.
 - **Few-shot NL2SQL** -- golden SQL examples from a curated database guide the LLM's SQL generation.
-- **Multi-persona routing** -- root agent prompt encodes MCH domain knowledge (red flag thresholds, derived metrics) and adapts responses by user role.
+- **Multi-persona routing** -- root agent prompt encodes MCH domain knowledge (red flag thresholds, derived metrics) and adapts responses by user role (Decision Maker, Frontline Worker, Citizen, Analyst).
+- **Modular prompt system** -- prompts are assembled dynamically from configuration (Persona, DatasetConfig, RelationsConfig) rather than hardcoded strings.
 
 ## Setup
 
@@ -218,13 +229,16 @@ GOOGLE_CLOUD_PROJECT=your-project-id
 GOOGLE_CLOUD_LOCATION=your-region
 
 # Dataset config
-DATASET_CONFIG_FILE=mecdm_superapp_config.json
+DATASET_CONFIG_FILE=dataset_mecdm.json
 
 # Models
 ROOT_AGENT_MODEL=gemini-2.5-pro
 ANALYTICS_AGENT_MODEL=gemini-2.5-pro
 BASELINE_NL2SQL_MODEL=gemini-2.5-pro
 ALLOYDB_AGENT_MODEL=gemini-2.5-pro
+
+# Agent persona
+AGENT_PERSONA=decision_maker  # decision_maker|frontline_worker|citizen|analyst
 
 # AlloyDB / MCP Toolbox
 ALLOYDB_TOOLSET=postgres-database-tools
@@ -239,6 +253,10 @@ DATABASE_URL_USER=postgresql://user:pass@host/dbname
 
 # Cross-dataset relations
 CROSS_DATASET_RELATIONS_DEFS=./cross_dataset_relations.json
+
+# Privacy & CORS
+STRICT_PRIVACY=true
+ALLOW_ORIGINS=http://localhost:3000
 ```
 
 ### Running Locally
@@ -290,10 +308,10 @@ make setup-dev-env
 
 ## Optimizing and Adjustment Tips
 
-- **Prompt Engineering:** Refine the system prompts in `data_science/prompts.py` and sub-agent prompts (`sub_agents/alloydb/prompts.py`, `sub_agents/analytics/prompts.py`) to improve accuracy. The root agent prompt contains MCH domain knowledge, red flag thresholds, and routing logic -- adjust these to match evolving data or requirements.
+- **Prompt Engineering:** Refine the modular prompt system in `data_science/prompts/prompt_builder.py` and sub-agent prompts (`sub_agents/alloydb/prompts.py`, `sub_agents/analytics/prompts.py`) to improve accuracy. The root agent prompt is built dynamically from Persona, DatasetConfig, and RelationsConfig -- adjust these to match evolving data or requirements.
 - **Golden SQL Examples:** Add curated question-SQL pairs to the `GoldenSql` table in the user database. The AlloyDB agent uses these as few-shot examples for NL2SQL generation -- more examples directly improve query accuracy.
 - **Model Selection:** Swap models per agent via environment variables (`ROOT_AGENT_MODEL`, `ALLOYDB_AGENT_MODEL`, `ANALYTICS_AGENT_MODEL`). Use a heavier model (e.g., `gemini-2.5-pro`) for the root agent and lighter models (e.g., `gemini-2.5-flash`) for sub-agents to balance quality and latency.
-- **Dataset Configuration:** Edit `mecdm_superapp_config.json` to add/remove tables, update column descriptions, or adjust cross-dataset relationships in `cross_dataset_relations.json`. Clear descriptions on tables and columns significantly boost NL2SQL performance.
+- **Dataset Configuration:** Edit `dataset_mecdm.json` to add/remove tables, update column descriptions, or adjust cross-dataset relationships in `cross_dataset_relations.json`. Clear descriptions on tables and columns significantly boost NL2SQL performance.
 - **Adding Tools:** Add new tools to the root agent in `data_science/tools.py` and register them in `data_science/agent.py`. Each tool should return a string result.
 - **Adding Sub-Agents:** Create a new directory under `data_science/sub_agents/` with `agent.py`, `prompts.py`, and `tools.py`, then register it as an `AgentTool` in the root agent.
 - **Visualization Schemas:** The `mecdm_viz` and `mecdm_stat` JSON schemas are defined in the root agent prompt. Modify them there to add new chart types or data fields.
@@ -302,8 +320,7 @@ make setup-dev-env
 
 | File | Purpose |
 |---|---|
-| `mecdm_superapp_config.json` | Defines all 25 tables, their descriptions, columns, and which AlloyDB dataset they belong to |
+| `dataset_mecdm.json` | Defines all 25 tables, their descriptions, columns, domains, and stats rules |
 | `cross_dataset_relations.json` | 18 foreign key relationships between tables (e.g., `mother_journeys` <-> `anc_visits` via `mother_id`) |
-| `dataset_schema.json` | JSON Schema that validates the config file format |
 | `toolbox-alloydb-local.yaml` | MCP Toolbox config for local AlloyDB connection |
 | `toolbox-alloydb-remote.yaml` | MCP Toolbox config for Cloud Run deployment |
