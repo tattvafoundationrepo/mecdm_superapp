@@ -25,12 +25,14 @@ from .tools import (
     call_analytics_agent,
     export_data_to_csv,
     find_nearest_facilities,
+    generate_stat_query,
     get_current_datetime,
     get_historical_weather_data,
     get_predefined_stats_catalog,
     get_stats_schema_summary,
     get_weather_data,
     search_policy_rag_engine,
+    validate_and_wrap_sql,
 )
 
 # Set up logging
@@ -135,6 +137,8 @@ def get_root_agent() -> LlmAgent:
     tools = [
         call_analytics_agent,
         find_nearest_facilities,
+        generate_stat_query,
+        validate_and_wrap_sql,
         get_current_datetime,
         get_weather_data,
         get_historical_weather_data,

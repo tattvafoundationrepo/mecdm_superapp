@@ -1,13 +1,18 @@
 """Tools for the ADK Samples Data Science Agent."""
 
+import hashlib
 import json
 import logging
+import os
 
 from google.adk.tools import ToolContext
 from google.adk.tools.agent_tool import AgentTool
+from google.genai import Client
+from google.genai.types import HttpOptions
 
 from .sub_agents import alloydb_agent
 from .sub_agents.alloydb.tools import get_toolbox_client
+from .utils.utils import USER_AGENT
 
 logger = logging.getLogger(__name__)
 
@@ -484,3 +489,195 @@ async def search_policy_rag_engine(query: str, tool_context: ToolContext) -> str
     except Exception as e:
         logger.error(f"Error querying RAG engine: {e}")
         return f"Error querying policy engine: {e}"
+
+
+# =============================================================================
+# StatQuery V2 generation tool
+# =============================================================================
+
+_v2_llm_client = None
+
+
+def _get_v2_llm_client():
+    global _v2_llm_client
+    if _v2_llm_client is None:
+        vertex_project = os.getenv("GOOGLE_CLOUD_PROJECT", None)
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
+        http_options = HttpOptions(headers={"user-agent": USER_AGENT})
+        _v2_llm_client = Client(
+            vertexai=True,
+            project=vertex_project,
+            location=location,
+            http_options=http_options,
+        )
+    return _v2_llm_client
+
+
+_STAT_QUERY_V2_PROMPT = """Generate a StatQuery V2 JSON object for this health data question.
+
+Schema (stats-eligible tables and their columns):
+{SCHEMA}
+
+StatQuery V2 format:
+{{
+  "version": 2,
+  "source": {{ "table": "<table_name>", "joins": [{{ "table": "<t>", "on": {{ "left": "<col>", "right": "<col>" }}, "type": "inner"|"left"|"right" }}] }},
+  "dimensions": [{{ "column": "<col>", "alias": "<display_name>", "transform": "date_trunc_month"|"date_trunc_quarter"|"date_trunc_year" }}],
+  "measures": [{{ "column": "<col>", "aggregate": "count"|"sum"|"avg"|"min"|"max"|"count_distinct", "alias": "<name>" }}],
+  "computedColumns": [{{ "alias": "<name>", "expression": "<safe expression referencing measure aliases>" }}],
+  "windows": [{{ "alias": "<name>", "function": "row_number"|"rank"|"dense_rank"|"lag"|"lead"|"sum"|"avg"|"count", "column": "<col>", "partitionBy": ["<col>"], "orderBy": [{{ "column": "<alias>", "direction": "asc"|"desc" }}], "offset": 1 }}],
+  "filters": [{{ "column": "<col>", "operator": "eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"in"|"not_in"|"like"|"is_null"|"is_not_null"|"between", "value": <val> }}],
+  "having": [{{ "column": "<measure_alias>", "operator": "gt"|"gte"|"lt"|"lte"|"eq"|"neq"|"between", "value": <val> }}],
+  "orderBy": [{{ "column": "<alias>", "direction": "asc"|"desc" }}],
+  "limit": 1000,
+  "timeRange": {{ "column": "<col>", "preset": "last_7d"|"last_30d"|"last_quarter"|"last_year"|"ytd"|"all" }}
+}}
+
+Rules:
+- version MUST be 2 (integer, not string)
+- source.table must be one of the stats-eligible tables
+- dimensions/measures columns must exist in the table schema
+- computedColumns expressions can ONLY reference measure/dimension aliases, arithmetic (+,-,*,/), numeric literals, COALESCE, NULLIF, ROUND, CEIL, FLOOR, ABS, GREATEST, LEAST, CAST, and CASE WHEN
+- having filters apply to measure aliases (post-aggregation)
+- windows: use rank/dense_rank for rankings, lag/lead for period-over-period, sum/avg/count for running aggregates
+- For year_month TEXT columns, do NOT use date_trunc transforms — use custom timeRange with "YYYY-MM" strings
+- In mother_journeys/anc_visits, ALL columns are TEXT — cast with CAST(col AS numeric) in computedColumns if needed
+- District names in mother_journeys/anc_visits are UPPERCASE (e.g., 'EAST KHASI HILLS')
+- Use integer code joins (district_code_lgd, block_code_lgd) over name joins
+
+Common patterns:
+- IDR: {{"alias":"idr","expression":"inst_del * 100.0 / NULLIF(total_del, 0)"}}
+- MMR: {{"alias":"mmr","expression":"deaths * 100000.0 / NULLIF(total_del, 0)"}}
+- Ranking: {{"alias":"rank","function":"rank","orderBy":[{{"column":"registrations","direction":"desc"}}]}}
+- Threshold: having: [{{"column":"total_del","operator":"gt","value":100}}]
+
+Question: {QUESTION}
+
+Return ONLY the JSON object. No markdown fencing, no explanation."""
+
+
+async def generate_stat_query(
+    question: str,
+    tool_context: ToolContext,
+) -> str:
+    """Generate a StatQuery V2 JSON for a structured data question.
+
+    Use this tool for: district summaries, monthly trends, KPI metrics, rankings,
+    rate calculations (IDR/MMR/IMR), facility counts, comparisons with thresholds,
+    period-over-period analysis.
+
+    The generated query is structured JSON that the frontend can execute, render
+    as an interactive chart, and save to the dashboard. Prefer this over
+    call_alloydb_agent for any query that fits the StatQuery V2 format.
+
+    Args:
+        question: The natural language question about health data.
+
+    Returns:
+        A validated StatQuery V2 JSON string, or an error message if generation fails.
+    """
+    try:
+        schema_summary = await get_stats_schema_summary(tool_context)
+
+        prompt = _STAT_QUERY_V2_PROMPT.format(
+            SCHEMA=schema_summary,
+            QUESTION=question,
+        )
+
+        response = _get_v2_llm_client().models.generate_content(
+            model=os.getenv("BASELINE_NL2SQL_MODEL", ""),
+            contents=prompt,
+            config={"temperature": 0.1},
+        )
+
+        raw_text = (response.text or "").strip()
+        # Strip markdown fencing if the LLM added it
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("\n", 1)[1] if "\n" in raw_text else raw_text
+        if raw_text.endswith("```"):
+            raw_text = raw_text.rsplit("```", 1)[0].strip()
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:].strip()
+
+        # Parse and validate
+        query = json.loads(raw_text)
+
+        # Ensure version is set
+        if query.get("version") != 2:
+            query["version"] = 2
+
+        # Validate table
+        table = query.get("source", {}).get("table", "")
+        if table not in STATS_ALLOWLISTED_TABLES:
+            return f"Error: Table '{table}' is not in the stats-eligible tables: {STATS_ALLOWLISTED_TABLES}"
+
+        # Validate computed columns if present
+        if query.get("computedColumns"):
+            from .app_utils.expression_validator import validate_computed_columns
+
+            allowed_cols: set[str] = set()
+            for dim in query.get("dimensions", []):
+                allowed_cols.add(dim.get("alias", dim.get("column", "")))
+                allowed_cols.add(dim.get("column", ""))
+            for m in query.get("measures", []):
+                allowed_cols.add(m.get("alias", m.get("column", "")))
+                allowed_cols.add(m.get("column", ""))
+
+            is_safe, reason = validate_computed_columns(
+                query["computedColumns"], allowed_cols
+            )
+            if not is_safe:
+                return f"Error: Unsafe computed column — {reason}"
+
+        tool_context.state["stat_query_v2"] = query
+        return json.dumps(query)
+
+    except json.JSONDecodeError as e:
+        logger.error("generate_stat_query JSON parse error: %s", e)
+        return f"Error: Failed to parse generated query as JSON — {e}"
+    except Exception as e:
+        logger.error("generate_stat_query error: %s", e)
+        return f"Error: {e}"
+
+
+async def validate_and_wrap_sql(
+    sql: str,
+    columns: list[str],
+    tables: list[str],
+    tool_context: ToolContext,
+) -> str:
+    """Wrap a validated SQL query in a ValidatedSqlQuery envelope for dashboard saving.
+
+    Use this ONLY after call_alloydb_agent returns results for a complex query
+    that could NOT be expressed as StatQuery V2 (e.g., queries with CTEs, UNION,
+    correlated subqueries, or complex CASE expressions).
+
+    The returned JSON envelope can be embedded in an mecdm_stat block and saved
+    to the dashboard.
+
+    Args:
+        sql: The SQL SELECT query to wrap (must already be verified as working).
+        columns: List of output column names from the query results.
+        tables: List of table names referenced by the query.
+
+    Returns:
+        A ValidatedSqlQuery JSON string, or an error message if validation fails.
+    """
+    from .app_utils.sql_validator import validate_sql
+
+    is_safe, reason = validate_sql(sql)
+    if not is_safe:
+        return f"Error: SQL validation failed — {reason}"
+
+    sql_hash = hashlib.sha256(sql.encode()).hexdigest()
+
+    envelope = {
+        "version": "validated_sql",
+        "sql": sql,
+        "hash": sql_hash,
+        "columns": columns,
+        "tables": tables,
+    }
+
+    tool_context.state["validated_sql_query"] = envelope
+    return json.dumps(envelope)
