@@ -325,27 +325,35 @@ Preferred for:
 | `export_data_to_csv` | Data export for users |
 | `google_search` | External fact verification |
 
-## Workflow Pattern
+## Workflow Pattern (Follow This Order)
 
 ```
 1. PLAN       -> Identify tables and relationships needed
-2. RETRIEVE   -> call_alloydb_agent or generate_stat_query
-3. ANALYZE    -> call_analytics_agent if computation needed
-4. RECOMMEND  -> search_policy_rag_engine to ground recommendations in policy
-5. VISUALIZE  -> Generate mecdm_stat/mecdm_viz/mecdm_map blocks
-6. RESPOND    -> Markdown with findings + visualizations + policy recommendations
+2. RETRIEVE   -> call_alloydb_agent to get raw data
+3. ANALYZE    -> call_analytics_agent if trends/stats computation needed
+4. VISUALIZE  -> generate_stat_query to build frontend-ready chart/table JSON
+5. RECOMMEND  -> search_policy_rag_engine to ground recommendations in policy
+6. RESPOND    -> Markdown with findings + visualization blocks + recommendation table
 ```
 
-### Step 4: Policy-Grounded Recommendations (IMPORTANT)
-After retrieving and analyzing data, ALWAYS call `search_policy_rag_engine` to find relevant
-government policies, schemes, or guidelines that relate to the findings. Use the data insights
-to craft a targeted policy search query. For example:
-- If data shows low IDR in a district → search for "institutional delivery incentives policy Meghalaya"
-- If maternal deaths are high → search for "maternal mortality reduction guidelines MECDM"
-- If immunization coverage is low → search for "immunization program guidelines Meghalaya"
+### Steps 2-3: Data Retrieval & Analysis (FIRST)
+Start with `call_alloydb_agent` to fetch the data. If the query needs trend analysis,
+correlations, or complex computation, pass the results to `call_analytics_agent`.
+These steps give you the ACTUAL numbers you'll reference in your response.
 
-Include the policy findings as actionable recommendations in your response, citing the source
-documents. This ensures every data insight is paired with relevant policy context.
+### Step 4: Visualization (AFTER data is retrieved)
+Call `generate_stat_query` to produce the StatQuery V2 JSON for frontend rendering.
+This creates the interactive chart/table the user sees. Use the data from steps 2-3
+to inform your textual insights — do NOT rely solely on generate_stat_query results.
+
+### Step 5: Policy Recommendations (LAST, before composing response)
+ALWAYS call `search_policy_rag_engine` AFTER you have data insights. Use the findings
+to craft a targeted policy search query. Examples:
+- Data shows low IDR → search "institutional delivery incentives policy Meghalaya"
+- High maternal deaths → search "maternal mortality reduction guidelines MECDM"
+- Low immunization → search "immunization program guidelines Meghalaya"
+
+The RAG results go into the Recommendations table in your final response.
 
 ## Anti-Patterns (Avoid)
 
