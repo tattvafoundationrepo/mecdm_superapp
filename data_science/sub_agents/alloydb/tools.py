@@ -4,13 +4,10 @@ import logging
 import os
 
 from google.adk.tools import ToolContext
-from google.genai import Client
-from google.genai.types import HttpOptions
 from toolbox_core import ToolboxSyncClient, auth_methods
 
+from data_science.app_utils.llm_client import get_llm_client
 from data_science.utils.utils import get_env_var
-
-from ...utils.utils import USER_AGENT
 
 ALLOYDB_TOOLSET = os.getenv("ALLOYDB_TOOLSET", "postgres-database-tools")
 # The agent connects to AlloyDB using the MCP Toolbox for Databases
@@ -18,18 +15,6 @@ ALLOYDB_TOOLSET = os.getenv("ALLOYDB_TOOLSET", "postgres-database-tools")
 # for a remote deployment.
 MCP_TOOLBOX_HOST = os.getenv("MCP_TOOLBOX_HOST", "localhost")
 MCP_TOOLBOX_PORT = os.getenv("MCP_TOOLBOX_PORT", "5000")
-
-# MAX_NUM_ROWS = 80
-
-vertex_project = os.getenv("GOOGLE_CLOUD_PROJECT", None)
-location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
-http_options = HttpOptions(headers={"user-agent": USER_AGENT})
-llm_client = Client(
-    vertexai=True,
-    project=vertex_project,
-    location=location,
-    http_options=http_options,
-)
 
 database_settings = None
 toolbox_client = None
@@ -203,7 +188,7 @@ If no tables are relevant, return "none".
         QUESTION=question,
     )
 
-    selection_response = llm_client.models.generate_content(
+    selection_response = get_llm_client().models.generate_content(
         model=os.getenv("BASELINE_NL2SQL_MODEL", ""),
         contents=selection_prompt,
         config={"temperature": 0.1},
@@ -235,7 +220,7 @@ Example Queries (verified correct — follow these patterns):
         EXAMPLES_SECTION=examples_section,
     )
 
-    response = llm_client.models.generate_content(
+    response = get_llm_client().models.generate_content(
         model=os.getenv("BASELINE_NL2SQL_MODEL", ""),
         contents=prompt,
         config={"temperature": 0.1},
@@ -318,36 +303,18 @@ def run_alloydb_query(
     sql_string = cleanup_sql(sql_string)
     logger.debug("Validating SQL (after cleanup): %s", sql_string)
 
+    from data_science.app_utils.db import execute_readonly_sql
+
     final_result = {"query_result": "", "error_message": ""}
 
-    # Validate SQL using pglast (PostgreSQL's actual C parser)
-    from data_science.app_utils.sql_validator import validate_sql
-
-    is_safe, reason = validate_sql(sql_string)
-    if not is_safe:
-        final_result["error_message"] = f"Blocked: {reason}"
-        return final_result
-
-    try:
-        execute_sql_tool = get_toolbox_client().load_tool("execute_sql")
-        logger.debug("Sending SQL query: %s", sql_string)
-        results = execute_sql_tool(sql_string)
-        logger.debug("Received results: %s", results)
-
-        if results:  # Check if query returned data
-            final_result["query_result"] = results
-            tool_context.state["alloydb_query_result"] = results
-
-        else:
-            final_result["error_message"] = (
-                "Valid SQL. Query executed successfully (no results)."
-            )
-
-    except (
-        # Catch generic BQ exceptions  # pylint: disable=broad-exception-caught
-        Exception
-    ) as e:
-        final_result["error_message"] = f"Query error: {e}"
+    success, results, error = execute_readonly_sql(sql_string)
+    if not success:
+        final_result["error_message"] = error
+    elif results:
+        final_result["query_result"] = results
+        tool_context.state["alloydb_query_result"] = results
+    else:
+        final_result["error_message"] = error  # "Query executed successfully (no results)."
 
     logger.debug("run_alloydb_query final_result: %s", final_result)
 
