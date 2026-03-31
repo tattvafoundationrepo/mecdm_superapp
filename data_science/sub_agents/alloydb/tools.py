@@ -7,6 +7,7 @@ from google.adk.tools import ToolContext
 from google.genai import Client
 from google.genai.types import HttpOptions
 from toolbox_core import ToolboxSyncClient, auth_methods
+from toolbox_core.protocol import Protocol
 
 from data_science.utils.utils import get_env_var
 
@@ -38,29 +39,42 @@ toolbox_toolset = None
 logger = logging.getLogger(__name__)
 
 
+def _build_toolbox_url():
+    """Build the toolbox URL from environment variables."""
+    if MCP_TOOLBOX_HOST in ["localhost", "127.0.0.1"]:
+        return f"http://{MCP_TOOLBOX_HOST}:{MCP_TOOLBOX_PORT}"
+    toolbox_url = f"https://{MCP_TOOLBOX_HOST}"
+    if MCP_TOOLBOX_PORT != "":
+        toolbox_url += f":{MCP_TOOLBOX_PORT}"
+    return toolbox_url
+
+
 def get_toolbox_client():
     """Get MCP Toolbox client."""
     global toolbox_client
     if toolbox_client is None:
-        logger.info(
-            "Connecting to MCP Toolbox at %s:%s",
-            MCP_TOOLBOX_HOST,
-            MCP_TOOLBOX_PORT,
-        )
-        if MCP_TOOLBOX_HOST in ["localhost", "127.0.0.1"]:
-            toolbox_url = f"http://{MCP_TOOLBOX_HOST}:{MCP_TOOLBOX_PORT}"
-            logger.info("Connecting to local MCP Toolbox at %s", toolbox_url)
-            toolbox_client = ToolboxSyncClient(toolbox_url)
-        else:
-            toolbox_url = f"https://{MCP_TOOLBOX_HOST}"
-            if MCP_TOOLBOX_PORT != "":
-                toolbox_url += f":{MCP_TOOLBOX_PORT}"
-            logger.info("Connecting to remote MCP Toolbox at %s", toolbox_url)
+        toolbox_url = _build_toolbox_url()
+        logger.info("Connecting to MCP Toolbox at %s", toolbox_url)
+
+        client_headers = {}
+        if MCP_TOOLBOX_HOST not in ["localhost", "127.0.0.1"]:
             auth_token_provider = auth_methods.aget_google_id_token(toolbox_url)
-            toolbox_client = ToolboxSyncClient(
-                toolbox_url,
-                client_headers={"Authorization": auth_token_provider},
-            )
+            client_headers["Authorization"] = auth_token_provider
+
+        toolbox_client = ToolboxSyncClient(
+            toolbox_url,
+            client_headers=client_headers,
+            protocol=Protocol.MCP_LATEST,
+        )
+        toolbox_client.__enter__()
+
+        # Debug: list all available tools on the server
+        try:
+            all_tools = toolbox_client.load_toolset()
+            tool_names = [t.__name__ for t in all_tools]
+            logger.info("Toolbox available tools: %s", tool_names)
+        except Exception as e:
+            logger.warning("Could not list toolbox tools: %s", e)
     return toolbox_client
 
 
@@ -68,7 +82,9 @@ def get_toolbox_toolset():
     """Get MCP Toolbox toolset."""
     global toolbox_toolset
     if toolbox_toolset is None:
-        toolbox_toolset = get_toolbox_client().load_toolset(ALLOYDB_TOOLSET)
+        toolbox_toolset = get_toolbox_client().load_toolset(toolset_name=ALLOYDB_TOOLSET)
+        tool_names = [t.__name__ for t in toolbox_toolset]
+        logger.info("Loaded toolset '%s' with tools: %s", ALLOYDB_TOOLSET, tool_names)
     return toolbox_toolset
 
 
