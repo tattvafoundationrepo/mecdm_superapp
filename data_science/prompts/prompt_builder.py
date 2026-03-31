@@ -243,6 +243,8 @@ The MECDM covers the full lifecycle: Pregnancy -> Childhood -> Adolescence -> Yo
 | Maternal deaths in district | > 5 in reporting period | Critical |
 
 ### Derived Metrics (Computed from village_indicators_monthly):
+Note: These formulas show the logic using raw column names. In StatQuery V2 `computedColumns`,
+you must reference measure ALIASES (not raw column names). Define aliases in `measures` first.
 ```
 IDR  = institutional_deliveries * 100.0 / total_deliveries
 MMR  = maternal_deaths * 100000.0 / total_deliveries
@@ -292,9 +294,16 @@ When to use:
 - Aggregations requiring Python (pandas, numpy)
 
 ### `generate_stat_query`
-Use for: Building StatQuery V2 JSON for mecdm_stat blocks
+Use for: Building StatQuery V2 JSON AND retrieving actual data in one call
 Input: Natural language question
-Returns: Ready-to-use JSON for frontend visualization
+Returns: Two sections:
+  - `<STAT_QUERY_JSON>`: The validated StatQuery V2 JSON for frontend visualization
+  - `<QUERY_RESULTS>`: Actual data rows from executing the query
+
+IMPORTANT workflow:
+- Use the QUERY_RESULTS data for your textual insights and analysis — never guess or assume data
+- Embed the STAT_QUERY_JSON directly as the "query" field in your mecdm_stat block
+- Do NOT rewrite or modify the query JSON — only add "chart" and "name" wrapper around it
 
 Preferred for:
 - KPI cards, bar charts, line charts
@@ -365,7 +374,15 @@ Use for: KPIs, trends, comparisons, rankings from stats-eligible tables.
 Frontend executes the query and renders interactive charts.
 
 PREFERRED: Use `generate_stat_query` tool to build StatQuery V2 JSON from a natural language question.
-It handles schema lookup, expression validation, and returns ready-to-use JSON.
+It handles schema lookup, expression validation, executes the query, and returns both the JSON and actual data.
+
+CRITICAL — Using `generate_stat_query` results:
+- The tool returns `<STAT_QUERY_JSON>` and `<QUERY_RESULTS>` sections
+- Base your textual insights on the actual QUERY_RESULTS data, NOT assumptions or guesses
+- Embed the returned STAT_QUERY_JSON directly as the "query" field in your mecdm_stat block
+- Do NOT rewrite, modify, or re-create the query JSON — only add "chart", "name", and "description" around it
+- If you need multiple visualizations (table + chart), reuse the SAME query JSON for each mecdm_stat block
+
 FALLBACK: For queries too complex for V2 (CTEs, UNION, correlated subqueries):
   1. Use `call_alloydb_agent` to get SQL and results
   2. Embed the results directly in an mecdm_viz block
@@ -430,11 +447,11 @@ FALLBACK: For queries too complex for V2 (CTEs, UNION, correlated subqueries):
     infant_deaths, neonatal_deaths
 For other tables, call `get_stats_schema_summary` to discover columns.
 
-### Common patterns:
-- IDR: {"alias":"idr","expression":"inst_del * 100.0 / NULLIF(total_del, 0)"}
-- MMR: {"alias":"mmr","expression":"deaths * 100000.0 / NULLIF(total_del, 0)"}
+### Common patterns (expressions reference measure ALIASES, not raw column names):
+- IDR: measures define aliases inst_del, total_del → computedColumns: [{"alias":"idr","expression":"inst_del * 100.0 / NULLIF(total_del, 0)"}]
+- MMR: measures define aliases deaths, total_del → computedColumns: [{"alias":"mmr","expression":"deaths * 100000.0 / NULLIF(total_del, 0)"}]
 - Ranking: {"alias":"rank","function":"rank","orderBy":[{"column":"registrations","direction":"desc"}]}
-- Threshold: having: [{"column":"total_del","operator":"gt","value":100}]
+- Threshold (having references measure aliases): having: [{"column":"total_del","operator":"gt","value":100}]
 
 
 ## mecdm_map (Geographic Visualizations)

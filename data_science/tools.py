@@ -540,6 +540,225 @@ async def search_policy_rag_engine(query: str, tool_context: ToolContext) -> str
 # StatQuery V2 generation tool
 # =============================================================================
 
+
+def _qi(identifier: str) -> str:
+    """Quote a SQL identifier."""
+    return f'"{identifier.replace(chr(34), chr(34)+chr(34))}"'
+
+
+_OPERATOR_SQL = {
+    "eq": "=",
+    "neq": "!=",
+    "gt": ">",
+    "gte": ">=",
+    "lt": "<",
+    "lte": "<=",
+    "like": "LIKE",
+}
+
+_TIME_PRESETS = {
+    "last_7d": "7 days",
+    "last_30d": "30 days",
+    "last_quarter": "3 months",
+    "last_year": "1 year",
+    "ytd": "ytd",
+}
+
+
+def _compile_stat_query_v2_to_sql(query: dict) -> str:
+    """Compile a StatQuery V2 dict into a PostgreSQL string.
+
+    This is a simplified backend compiler for executing stat queries and
+    returning preview data. The frontend has a full-featured compiler;
+    this handles the common cases so the agent can see actual results.
+    """
+    table = query["source"]["table"]
+    alias = "t0"
+
+    dimensions = query.get("dimensions", [])
+    measures = query.get("measures", [])
+    computed_columns = query.get("computedColumns", [])
+    filters = query.get("filters", [])
+    having = query.get("having", [])
+    order_by = query.get("orderBy", [])
+    limit = min(query.get("limit", 1000), 10_000)
+    time_range = query.get("timeRange")
+
+    needs_wrapper = len(computed_columns) > 0
+
+    # --- Inner SELECT ---
+    select_parts: list[str] = []
+    inner_aliases: list[str] = []
+
+    for dim in dimensions:
+        col_ref = f'{_qi(alias)}.{_qi(dim["column"])}'
+        transform = dim.get("transform")
+        if transform == "date_trunc_month":
+            col_ref = f"DATE_TRUNC('month', {col_ref})"
+        elif transform == "date_trunc_quarter":
+            col_ref = f"DATE_TRUNC('quarter', {col_ref})"
+        elif transform == "date_trunc_year":
+            col_ref = f"DATE_TRUNC('year', {col_ref})"
+        dim_alias = dim.get("alias", dim["column"])
+        select_parts.append(f"{col_ref} AS {_qi(dim_alias)}")
+        inner_aliases.append(dim_alias)
+
+    # Track alias→aggregate expression for HAVING
+    alias_to_agg: dict[str, str] = {}
+
+    for m in measures:
+        col_ref = f'{_qi(alias)}.{_qi(m["column"])}'
+        agg = m["aggregate"]
+        if agg == "count_distinct":
+            agg_expr = f"COUNT(DISTINCT {col_ref})"
+        else:
+            agg_expr = f"{agg.upper()}({col_ref})"
+        m_alias = m.get("alias", m["column"])
+        select_parts.append(f"{agg_expr} AS {_qi(m_alias)}")
+        inner_aliases.append(m_alias)
+        alias_to_agg[m_alias] = agg_expr
+
+    # --- FROM ---
+    from_clause = f"{_qi(table)} AS {_qi(alias)}"
+    joins = query.get("source", {}).get("joins", [])
+    for i, join in enumerate(joins):
+        j_alias = f"t{i + 1}"
+        j_type = join.get("type", "inner").upper()
+        left_ref = f'{_qi(alias)}.{_qi(join["on"]["left"])}'
+        right_ref = f'{_qi(j_alias)}.{_qi(join["on"]["right"])}'
+        if join.get("caseInsensitive"):
+            on_clause = f"UPPER({left_ref}) = UPPER({right_ref})"
+        else:
+            on_clause = f"{left_ref} = {right_ref}"
+        from_clause += f" {j_type} JOIN {_qi(join['table'])} AS {_qi(j_alias)} ON {on_clause}"
+
+    # --- WHERE ---
+    where_parts: list[str] = []
+
+    if time_range and time_range.get("column"):
+        col = _qi(time_range["column"])
+        preset = time_range.get("preset", "all")
+        custom = time_range.get("custom")
+        if preset != "all" and not custom:
+            pg_interval = _TIME_PRESETS.get(preset)
+            if pg_interval and pg_interval != "ytd":
+                where_parts.append(
+                    f"{col} >= (CURRENT_DATE - INTERVAL '{pg_interval}')::text"
+                )
+            elif pg_interval == "ytd":
+                where_parts.append(
+                    f"{col} >= TO_CHAR(DATE_TRUNC('year', CURRENT_DATE), 'YYYY-MM')"
+                )
+        elif custom:
+            if custom.get("from"):
+                where_parts.append(f"{col} >= '{custom['from']}'")
+            if custom.get("to"):
+                where_parts.append(f"{col} <= '{custom['to']}'")
+
+    for f in filters:
+        col = f'{_qi(alias)}.{_qi(f["column"])}'
+        op = f.get("operator", "eq")
+        val = f.get("value")
+        if op in _OPERATOR_SQL:
+            if isinstance(val, str):
+                where_parts.append(f"{col} {_OPERATOR_SQL[op]} '{val}'")
+            else:
+                where_parts.append(f"{col} {_OPERATOR_SQL[op]} {val}")
+        elif op == "in" and isinstance(val, list):
+            vals = ", ".join(
+                f"'{v}'" if isinstance(v, str) else str(v) for v in val
+            )
+            where_parts.append(f"{col} IN ({vals})")
+        elif op == "not_in" and isinstance(val, list):
+            vals = ", ".join(
+                f"'{v}'" if isinstance(v, str) else str(v) for v in val
+            )
+            where_parts.append(f"{col} NOT IN ({vals})")
+        elif op == "is_null":
+            where_parts.append(f"{col} IS NULL")
+        elif op == "is_not_null":
+            where_parts.append(f"{col} IS NOT NULL")
+        elif op == "between" and isinstance(val, list) and len(val) == 2:
+            lo, hi = val
+            lo_str = f"'{lo}'" if isinstance(lo, str) else str(lo)
+            hi_str = f"'{hi}'" if isinstance(hi, str) else str(hi)
+            where_parts.append(f"{col} BETWEEN {lo_str} AND {hi_str}")
+
+    where_str = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
+    # --- GROUP BY ---
+    group_by_str = ""
+    if dimensions:
+        group_by_str = f"GROUP BY {', '.join(str(i + 1) for i in range(len(dimensions)))}"
+
+    # --- HAVING ---
+    having_parts: list[str] = []
+    computed_alias_set = {cc["alias"] for cc in computed_columns}
+    for h in having:
+        h_col = h["column"]
+        h_op = _OPERATOR_SQL.get(h.get("operator", "eq"), "=")
+        h_val = h.get("value")
+        # HAVING on computed columns must go in outer WHERE
+        if h_col in computed_alias_set:
+            continue
+        agg_expr = alias_to_agg.get(h_col)
+        if agg_expr:
+            if isinstance(h_val, str):
+                having_parts.append(f"{agg_expr} {h_op} '{h_val}'")
+            else:
+                having_parts.append(f"{agg_expr} {h_op} {h_val}")
+
+    having_str = f"HAVING {' AND '.join(having_parts)}" if having_parts else ""
+
+    if not needs_wrapper:
+        # Simple single-layer query
+        order_str = ""
+        if order_by:
+            ob_parts = []
+            for o in order_by:
+                direction = o.get("direction", "asc").upper()
+                ob_parts.append(f"{_qi(o['column'])} {direction}")
+            order_str = f"ORDER BY {', '.join(ob_parts)}"
+
+        sql = f"SELECT {', '.join(select_parts)} FROM {from_clause} {where_str} {group_by_str} {having_str} {order_str} LIMIT {limit}"
+        return " ".join(sql.split())
+
+    # Two-layer query: inner has dimensions+measures, outer adds computed columns
+    inner_sql = f"SELECT {', '.join(select_parts)} FROM {from_clause} {where_str} {group_by_str} {having_str}"
+
+    outer_select = [_qi(a) for a in inner_aliases]
+    for cc in computed_columns:
+        outer_select.append(f"({cc['expression']}) AS {_qi(cc['alias'])}")
+
+    # Outer HAVING (for computed column filters)
+    outer_where_parts: list[str] = []
+    for h in having:
+        if h["column"] in computed_alias_set:
+            h_op = _OPERATOR_SQL.get(h.get("operator", "eq"), "=")
+            h_val = h.get("value")
+            expr = next(
+                (cc["expression"] for cc in computed_columns if cc["alias"] == h["column"]),
+                _qi(h["column"]),
+            )
+            if isinstance(h_val, str):
+                outer_where_parts.append(f"({expr}) {h_op} '{h_val}'")
+            else:
+                outer_where_parts.append(f"({expr}) {h_op} {h_val}")
+
+    outer_where = f"WHERE {' AND '.join(outer_where_parts)}" if outer_where_parts else ""
+
+    order_str = ""
+    if order_by:
+        ob_parts = []
+        for o in order_by:
+            direction = o.get("direction", "asc").upper()
+            ob_parts.append(f"{_qi(o['column'])} {direction}")
+        order_str = f"ORDER BY {', '.join(ob_parts)}"
+
+    sql = f"SELECT {', '.join(outer_select)} FROM ({inner_sql}) AS _inner {outer_where} {order_str} LIMIT {limit}"
+    return " ".join(sql.split())
+
+
 _v2_llm_client = None
 
 
@@ -592,11 +811,10 @@ Rules:
 - IMPORTANT: When joining by name across tables with different casing (UPPERCASE vs Title Case), set "caseInsensitive": true on the join. This applies to ANY join between village_indicators_monthly/mother_journeys (UPPERCASE) and nfhs_indicators/master_*/anganwadi_centres (Title Case).
 - anganwadi_centres.block_code is NOT the same as block_code_lgd. Use district_code for district-level joins or name joins with caseInsensitive: true.
 
-Common patterns:
-- IDR: {{"alias":"idr","expression":"inst_del * 100.0 / NULLIF(total_del, 0)"}}
-- MMR: {{"alias":"mmr","expression":"deaths * 100000.0 / NULLIF(total_del, 0)"}}
-- Ranking: {{"alias":"rank","function":"rank","orderBy":[{{"column":"registrations","direction":"desc"}}]}}
-- Threshold: having: [{{"column":"total_del","operator":"gt","value":100}}]
+Common patterns (note: expressions reference measure ALIASES, not raw column names):
+- IDR: measures: [{{"column":"institutional_deliveries","aggregate":"sum","alias":"inst_del"}}, {{"column":"total_deliveries","aggregate":"sum","alias":"total_del"}}], computedColumns: [{{"alias":"idr","expression":"inst_del * 100.0 / NULLIF(total_del, 0)"}}]
+- MMR: measures: [{{"column":"maternal_deaths","aggregate":"sum","alias":"deaths"}}, {{"column":"total_deliveries","aggregate":"sum","alias":"total_del"}}], computedColumns: [{{"alias":"mmr","expression":"deaths * 100000.0 / NULLIF(total_del, 0)"}}]
+- Threshold (having references measure aliases): having: [{{"column":"total_del","operator":"gt","value":100}}]
 
 Question: {QUESTION}
 
@@ -607,7 +825,7 @@ async def generate_stat_query(
     question: str,
     tool_context: ToolContext,
 ) -> str:
-    """Generate a StatQuery V2 JSON for a structured data question.
+    """Generate a StatQuery V2 JSON for a structured data question AND execute it.
 
     Use this tool for: district summaries, monthly trends, KPI metrics, rankings,
     rate calculations (IDR/MMR/IMR), facility counts, comparisons with thresholds,
@@ -617,11 +835,18 @@ async def generate_stat_query(
     as an interactive chart, and save to the dashboard. Prefer this over
     call_alloydb_agent for any query that fits the StatQuery V2 format.
 
+    Returns both the validated StatQuery V2 JSON and the actual query results
+    so you can provide data-driven insights. Use the STAT_QUERY_JSON in your
+    mecdm_stat block (as the "query" field) and the QUERY_RESULTS for your
+    textual analysis.
+
     Args:
         question: The natural language question about health data.
 
     Returns:
-        A validated StatQuery V2 JSON string, or an error message if generation fails.
+        The validated StatQuery V2 JSON inside <STAT_QUERY_JSON> tags,
+        followed by actual query results inside <QUERY_RESULTS> tags.
+        On error, returns an error message string.
     """
     try:
         schema_summary = await get_stats_schema_summary(tool_context)
@@ -684,7 +909,65 @@ async def generate_stat_query(
                 return f"Error: Unsafe computed column — {reason}"
 
         tool_context.state["stat_query_v2"] = query
-        return json.dumps(query)
+        query_json = json.dumps(query)
+
+        # --- Execute the query to get actual data for agent insights ---
+        data_section = ""
+        try:
+            sql = _compile_stat_query_v2_to_sql(query)
+            logger.debug("generate_stat_query compiled SQL: %s", sql)
+
+            execute_sql_tool = get_toolbox_client().load_tool("execute_sql")
+            results = execute_sql_tool(sql)
+
+            if results:
+                # Format results as a markdown table for the agent
+                if isinstance(results, str):
+                    try:
+                        rows = json.loads(results)
+                    except json.JSONDecodeError:
+                        rows = None
+                        data_section = f"\n<QUERY_RESULTS>\n{results[:3000]}\n</QUERY_RESULTS>"
+                else:
+                    rows = results
+
+                if rows and isinstance(rows, list) and len(rows) > 0:
+                    # Limit to first 50 rows for context
+                    preview_rows = rows[:50]
+                    headers = list(preview_rows[0].keys()) if isinstance(preview_rows[0], dict) else []
+                    if headers:
+                        header_line = "| " + " | ".join(headers) + " |"
+                        sep_line = "| " + " | ".join("---" for _ in headers) + " |"
+                        row_lines = []
+                        for row in preview_rows:
+                            vals = []
+                            for h in headers:
+                                v = row.get(h, "")
+                                if v is None:
+                                    v = "NULL"
+                                elif isinstance(v, float):
+                                    v = f"{v:.2f}"
+                                else:
+                                    v = str(v)
+                                vals.append(v)
+                            row_lines.append("| " + " | ".join(vals) + " |")
+                        table_str = "\n".join([header_line, sep_line] + row_lines)
+                        total_note = ""
+                        if len(rows) > 50:
+                            total_note = f"\n(Showing 50 of {len(rows)} rows)"
+                        data_section = f"\n<QUERY_RESULTS>\n{table_str}{total_note}\n</QUERY_RESULTS>"
+                    else:
+                        data_section = f"\n<QUERY_RESULTS>\n{json.dumps(preview_rows, default=str)[:3000]}\n</QUERY_RESULTS>"
+                elif rows is not None and not data_section:
+                    data_section = "\n<QUERY_RESULTS>\nQuery returned no rows.\n</QUERY_RESULTS>"
+            else:
+                data_section = "\n<QUERY_RESULTS>\nQuery returned no rows.\n</QUERY_RESULTS>"
+
+        except Exception as exec_err:
+            logger.warning("generate_stat_query execution failed (non-fatal): %s", exec_err)
+            data_section = f"\n<QUERY_RESULTS>\nExecution error (use the JSON for frontend rendering): {exec_err}\n</QUERY_RESULTS>"
+
+        return f"<STAT_QUERY_JSON>\n{query_json}\n</STAT_QUERY_JSON>{data_section}"
 
     except json.JSONDecodeError as e:
         logger.error("generate_stat_query JSON parse error: %s", e)
