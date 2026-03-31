@@ -116,8 +116,8 @@ class AgentConfiguration:
                 try:
                     settings = get_alloydb_database_settings()
                     self.database_settings[dataset["type"]] = settings
-                    self.db_schema = settings.get("schema", "")
-                    logger.info("Loaded database schema from AlloyDB")
+                    self.db_schema = settings.get("schema_summary", "")
+                    logger.info("Loaded database schema summary from AlloyDB")
                 except Exception as e:
                     logger.warning("Could not load database schema: %s", e)
 

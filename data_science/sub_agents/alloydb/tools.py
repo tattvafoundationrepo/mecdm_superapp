@@ -80,10 +80,18 @@ def get_database_settings():
     return database_settings
 
 
-def get_schema():
+def get_schema_summary():
+    get_summary_tool = get_toolbox_client().load_tool("list_table_summaries")
+    schema_summary = get_summary_tool(
+        schema_names=get_env_var("ALLOYDB_SCHEMA_NAME")
+    )
+    return schema_summary
+
+
+def get_table_schema(table_names: str):
     get_schema_tool = get_toolbox_client().load_tool("list_tables")
     schema = get_schema_tool(
-        schema_names=get_env_var("ALLOYDB_SCHEMA_NAME"), table_names=""
+        schema_names=get_env_var("ALLOYDB_SCHEMA_NAME"), table_names=table_names
     )
     return schema
 
@@ -92,13 +100,13 @@ def update_database_settings():
     """Update database settings."""
     global database_settings
 
-    schema = get_schema()
+    schema_summary = get_schema_summary()
 
     database_settings = {
         "project_id": get_env_var("ALLOYDB_PROJECT_ID"),
         "database": get_env_var("ALLOYDB_DATABASE"),
         "schema_name": get_env_var("ALLOYDB_SCHEMA_NAME"),
-        "schema": schema,
+        "schema_summary": schema_summary,
     }
     return database_settings
 
@@ -177,7 +185,38 @@ Question: {QUESTION}
 Generate the PostgreSQL query.
    """
 
-    schema = tool_context.state["database_settings"]["alloydb"]["schema"]
+    schema_summary = tool_context.state["database_settings"]["alloydb"]["schema_summary"]
+
+    # --- Stage 1: Table Selection ---
+    selection_prompt_template = """
+Given the following database schema summary (tables and their descriptions):
+{SCHEMA_SUMMARY}
+
+Which specific tables are necessary to answer the following question?
+Question: {QUESTION}
+
+Return a comma-separated list of EXACT table names ONLY. Do not include any other text, reasoning, or markdown.
+If no tables are relevant, return "none".
+"""
+    selection_prompt = selection_prompt_template.format(
+        SCHEMA_SUMMARY=schema_summary,
+        QUESTION=question,
+    )
+
+    selection_response = llm_client.models.generate_content(
+        model=os.getenv("BASELINE_NL2SQL_MODEL", ""),
+        contents=selection_prompt,
+        config={"temperature": 0.1},
+    )
+
+    selected_tables = selection_response.text.strip() if selection_response.text else ""
+    logger.debug("Selected tables: %s", selected_tables)
+
+    if not selected_tables or selected_tables.lower() == "none":
+        return "SELECT 'No relevant tables found for this question' AS error;"
+
+    # --- Stage 2: Detailed Schema Fetch ---
+    schema = get_table_schema(selected_tables)
 
     # Fetch golden SQL examples for few-shot learning
     golden_examples = _fetch_golden_examples()
