@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 
 dependencies = [
     "python-dotenv>=1.0.1",
-    "google-adk>=1.14",
+    "google-adk[otel-gcp]>=1.14",
     "immutabledict>=4.2.1",
     "sqlglot>=26.10.1",
     "db-dtypes>=1.4.2",
