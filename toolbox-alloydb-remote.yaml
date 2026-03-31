@@ -99,7 +99,36 @@ tools:
               type: string
               description: "Optional: A comma-separated list of table names. If empty, details for all tables in user-accessible schemas will be listed."
 
+    list_table_summaries:
+        kind: postgres-sql
+        source: alloydb-pg-source
+        description: "Lists table names and comments as a lightweight summary for user-accessible schemas."
+        statement: |
+            WITH desired_relkinds AS (
+                SELECT ARRAY['r', 'p']::char[] AS kinds
+            )
+            SELECT
+                ns.nspname AS schema_name,
+                t.relname AS table_name,
+                obj_description(t.oid, 'pg_class') AS table_comment
+            FROM
+                pg_class t
+            JOIN
+                pg_namespace ns ON ns.oid = t.relnamespace
+            CROSS JOIN desired_relkinds dk
+            WHERE
+                t.relkind = ANY(dk.kinds)
+                AND (NULLIF(TRIM($1), '') IS NULL OR ns.nspname = ANY(string_to_array($1,',')))
+                AND ns.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                AND ns.nspname NOT LIKE 'pg_temp_%' AND ns.nspname NOT LIKE 'pg_toast_temp_%'
+            ORDER BY ns.nspname, t.relname;
+        parameters:
+            - name: schema_names
+              type: string
+              description: "Optional: A comma-separated list of schema names. If empty, summaries for all schemas will be listed."
+
 toolsets:
     alloydb-postgres-database-tools:
         - execute_sql
         - list_tables
+        - list_table_summaries
