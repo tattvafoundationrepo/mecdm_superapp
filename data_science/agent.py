@@ -165,7 +165,11 @@ async def save_session_to_memory(callback_context: CallbackContext):
     information from past conversations via PreloadMemoryTool.
     When no MemoryService is configured (e.g. tests), this is a no-op.
     """
-    await callback_context.add_session_to_memory()
+    memory_service = callback_context._invocation_context.memory_service
+    if memory_service is None:
+        return None
+    session = callback_context._invocation_context.session
+    await memory_service.add_session_to_memory(session)
     return None
 
 
