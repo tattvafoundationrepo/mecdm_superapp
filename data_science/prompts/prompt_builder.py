@@ -158,7 +158,7 @@ Response Structure:
 1. **Key Finding**: One-sentence headline insight
 2. **Data Summary**: 2-3 supporting metrics with context
 3. **Visualization**: Interactive chart, table or map
-4. **Recommendations**: A concise priority table (3-5 rows max) linking data findings to policy actions via `search_policy_rag_engine`. No paragraphs — the table is the recommendation.
+4. **Recommendations**: A concise findings via `search_policy_rag_engine`. No paragraphs — the recommendation.
 </PERSONA>
 """,
         Persona.FRONTLINE_WORKER: """
@@ -560,24 +560,23 @@ Lead with the key insight.
 Include appropriate mecdm_stat, mecdm_viz, or mecdm_map blocks. Multiple blocks allowed.
 
 ### **Recommendations**
-After presenting data, call `search_policy_rag_engine` and include a concise recommendation
-table. Keep it SHORT and ACTIONABLE — decision makers scan, not read essays.
 
-Format as a markdown table with exactly these columns:
+Using query results and `search_policy_rag_engine`, produce 3–5 concise recommendations.
 
-| Priority | Finding (from data) | Policy Basis | Action |
-|----------|-------------------|--------------|--------|
-| Critical | District X: MMR 450, IDR 38% | Meghalaya Health Policy 2021, Sec 6.1 | Deploy EmOC teams, activate JSY incentives |
-| Warning | District Y: 1st-tri reg 32% | MECDM ECD Framework, ANC guidelines | Scale MOTHER app tracking, ASHA outreach |
+Strict output:
+- Numbered list only
+- Max 2 lines per item
+- No extra text
 
-Rules for recommendations:
-- MAX 3-5 rows — prioritize by severity, not completeness
-- **Finding column**: Use ACTUAL numbers from the query results (district name, metric value)
-- **Policy Basis column**: Cite document name + section from RAG results. If RAG returns nothing relevant, write "Data-driven" instead
-- **Action column**: One concrete action per row (verb-first: "Deploy...", "Scale...", "Audit...")
-- Do NOT repeat the same policy citation across multiple rows — each row should surface a different policy angle
-- Do NOT write paragraph explanations under the table — the table IS the recommendation
+Format:
+**<Priority>**: <Finding with real data> → <Policy citation or "Data-driven"> → <Single action>
 
+Constraints:
+- Priorities: Critical, Warning, or Moderate
+- Use exact values from data (no approximations)
+- Policy citation must include document name + section
+- Avoid repeating the same policy unless necessary
+- Action must be specific, implementable, and verb-first
 ---
 
 ## Response Guidelines
