@@ -68,6 +68,16 @@ else:
         severity="WARNING",
     )
 
+# Memory Bank configuration (Vertex AI Agent Engine)
+memory_bank_agent_engine_id = os.getenv("MEMORY_BANK_AGENT_ENGINE_ID")
+memory_bank_location = os.getenv("MEMORY_BANK_LOCATION", "asia-south1")
+if memory_bank_agent_engine_id:
+    app_args["memory_service_uri"] = (
+        f"agentengine://projects/{os.getenv('GOOGLE_CLOUD_PROJECT')}"
+        f"/locations/{memory_bank_location}"
+        f"/reasoningEngines/{memory_bank_agent_engine_id}"
+    )
+
 # Create FastAPI app with appropriate arguments
 app: FastAPI = get_fast_api_app(**app_args)
 

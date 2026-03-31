@@ -26,6 +26,7 @@ from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.apps import App
 from google.adk.tools import google_search
+from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 from google.genai import types
 
 from .prompts.prompt_builder import (
@@ -157,6 +158,17 @@ def load_database_settings_in_context(callback_context: CallbackContext):
         callback_context.state["database_settings"] = _config.database_settings
 
 
+async def save_session_to_memory(callback_context: CallbackContext):
+    """Persist the current session to Vertex AI Memory Bank after each turn.
+
+    This callback triggers memory generation so the agent can recall
+    information from past conversations via PreloadMemoryTool.
+    When no MemoryService is configured (e.g. tests), this is a no-op.
+    """
+    await callback_context.add_session_to_memory()
+    return None
+
+
 # ============================================================================
 # Agent Factory
 # ============================================================================
@@ -187,6 +199,7 @@ def create_root_agent() -> LlmAgent:
 
     # Assemble tools list
     tools = [
+        PreloadMemoryTool(),  # Retrieve long-term memories at turn start
         call_analytics_agent,
         find_nearest_facilities,
         generate_stat_query,
@@ -213,6 +226,7 @@ def create_root_agent() -> LlmAgent:
         sub_agents=[],
         tools=tools,
         before_agent_callback=load_database_settings_in_context,
+        after_agent_callback=save_session_to_memory,
         generate_content_config=types.GenerateContentConfig(temperature=0.01),
     )
 

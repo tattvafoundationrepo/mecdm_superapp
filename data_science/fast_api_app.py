@@ -63,12 +63,26 @@ elif instance_connection_name and db_pass:
 
 artifact_service_uri = f"gs://{logs_bucket_name}" if logs_bucket_name else None
 
+# Memory Bank configuration (Vertex AI Agent Engine)
+memory_bank_agent_engine_id = os.environ.get("MEMORY_BANK_AGENT_ENGINE_ID")
+memory_bank_location = os.environ.get("MEMORY_BANK_LOCATION", "asia-south1")
+if memory_bank_agent_engine_id:
+    # Build full resource name so ADK can resolve project/location from it
+    memory_service_uri = (
+        f"agentengine://projects/{os.environ['GOOGLE_CLOUD_PROJECT']}"
+        f"/locations/{memory_bank_location}"
+        f"/reasoningEngines/{memory_bank_agent_engine_id}"
+    )
+else:
+    memory_service_uri = None
+
 app: FastAPI = get_fast_api_app(
     agents_dir=AGENT_DIR,
     web=False,
     artifact_service_uri=artifact_service_uri,
     allow_origins=allow_origins,
     session_service_uri=session_service_uri,
+    memory_service_uri=memory_service_uri,
     otel_to_cloud=True,
 )
 app.title = "mecdm-super-agent"
