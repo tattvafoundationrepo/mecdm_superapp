@@ -74,7 +74,8 @@ def load_dataset_config(config_path: Optional[str] = None) -> DatasetConfig:
         description=dataset["description"],
         domains=dataset.get("domains", []),
         stats_blocked_tables=dataset.get("stats_blocked_tables", []),
-        privacy_restricted_columns=dataset.get("privacy_restricted_columns", []),
+        privacy_restricted_columns=dataset.get(
+            "privacy_restricted_columns", []),
         raw_config=config,
     )
 
@@ -86,7 +87,8 @@ def load_relations_config(config_path: Optional[str] = None) -> RelationsConfig:
         # Fall back to default location relative to datasets config
         dataset_path = os.getenv("DATASET_CONFIG_FILE", "")
         if dataset_path:
-            path = str(Path(dataset_path).parent / "cross_dataset_relations.json")
+            path = str(Path(dataset_path).parent /
+                       "cross_dataset_relations.json")
 
     if not path or not Path(path).exists():
         return RelationsConfig(
@@ -155,7 +157,7 @@ Preferred Outputs:
 Response Structure:
 1. **Key Finding**: One-sentence headline insight
 2. **Data Summary**: 2-3 supporting metrics with context
-3. **Visualization**: Interactive chart or map
+3. **Visualization**: Interactive chart, table or map
 4. **Recommendation**: Actionable next step
 </PERSONA>
 """,
@@ -174,7 +176,6 @@ Preferred Outputs:
 - Due lists (ANC due, immunization due)
 - Simple count tables
 - Progress checklists
-- Map of nearby facilities
 
 Note: Individual mother records require explicit user authentication and consent.
 </PERSONA>
@@ -258,34 +259,6 @@ High_Risk_Rate = high_risk_registrations * 100.0 / total_registrations
 - 4+ ANC visits: >= 75%
 - Full immunization: >= 90%
 
-## Geographic Context
-- 12 Districts (11 with complete data; Eastern West Khasi Hills recently bifurcated)
-- 46 Blocks (47 in some datasets due to mapping variations)
-- ~7,400 villages
-- ~5,900 Anganwadi Centres
-- ~650 Health Facilities (PHC, CHC, SC, DH)
-
-## Data Quality Awareness
-Known issues from field validation:
-1. **Geography Master Inconsistencies**: LGD, ICDS, and Poshan Tracker use different block/village codes
-2. **AWC Identity Gap**: No single AWC identifier across systems
-3. **Text-based Geography**: mother_journeys uses TEXT names, not LGD codes
-4. **Dual Reporting**: Field workers maintain paper registers alongside digital tools
-
-Mitigation: Prefer `village_indicators_monthly` for aggregated stats (pre-normalized); use LGD codes when available.
-
-## Seasonal Patterns
-- Monsoon (Jun-Sep): Reduced institutional deliveries due to road access
-- Harvest season: Lower ANC attendance
-- Winter: Higher respiratory illness in children
-
-## Query Routing Hints
-- Village-level monthly aggregates -> village_indicators_monthly (has pre-computed counts)
-- Individual-level pregnancy journeys (ANC, delivery, child outcomes, anemia, BMI) -> mother_journeys
-- ANC visit-level vitals (weight, BP, haemoglobin per visit) -> anc_visits
-- Facility/AWC coverage -> anganwadi_centres, master_health_facilities tables
-- For district-level totals, prefer pre-aggregated views over scanning raw records.
-
 </DOMAIN_KNOWLEDGE>
 """.strip()
 
@@ -361,7 +334,6 @@ Preferred for:
 - Never fetch entire tables - always include WHERE filters
 - Never join tables without checking CROSS_DATASET_RELATIONS
 - Never expose mother_id or personal identifiers in results
-- You already have the schema. Do not ask the database agent for schema information.
 - After analysis completes, summarize all results with appropriate visualization blocks.
 - Data from previous steps is available for follow-up analysis via `call_analytics_agent`.
 
@@ -546,10 +518,7 @@ RESPONSE_FORMAT_BLOCK = """
 Structure all data responses with these sections:
 
 ### **Result**
-One-paragraph executive summary of findings. Lead with the key insight.
-
-### **Explanation**
-Plain-language methodology description. Use domain terminology (e.g., "counted institutional deliveries in each district") - NEVER mention table names, SQL, databases, or technical implementation.
+Lead with the key insight.
 
 ### **Visualizations**
 Include appropriate mecdm_stat, mecdm_viz, or mecdm_map blocks. Multiple blocks allowed.
@@ -567,8 +536,7 @@ Include appropriate mecdm_stat, mecdm_viz, or mecdm_map blocks. Multiple blocks 
 ## Formatting Rules
 
 - Use Markdown headers for sections
-- Limit tables to 10 rows unless explicitly requested
-- Round percentages to 1 decimal place
+- Round percentages to 2 decimal places
 - Format large numbers with commas (1,234,567)
 - Use ISO dates (YYYY-MM) for time periods
 
