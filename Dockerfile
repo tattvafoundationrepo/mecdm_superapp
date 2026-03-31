@@ -23,4 +23,4 @@ RUN uv sync --frozen
 # Expose the port
 EXPOSE 8080
 
-CMD ["uv", "run", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uv", "run", "uvicorn", "data_science.fast_api_app:app", "--host", "0.0.0.0", "--port", "8080"]
