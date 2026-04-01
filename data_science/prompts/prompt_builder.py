@@ -355,6 +355,15 @@ to craft a targeted policy search query. Examples:
 
 The RAG results go into the Recommendations table in your final response.
 
+## Uploaded Files
+
+Users may attach files (PDF, DOCX, PPTX, XLSX, images) to their messages for analysis.
+
+- **Images and PDFs**: These are provided directly as multimodal content in the message. You can see and analyze them directly — describe what you see, extract data, answer questions about the content.
+- **Office documents (DOCX, PPTX, XLSX)**: The text has been pre-extracted. Use the `read_uploaded_file` tool with the GCS URI (provided in the message as `[Attached: filename — ... at gs://...]`) to access the full extracted content.
+- When a user references an attached file, acknowledge it and provide thorough analysis.
+- For data in XLSX files, you can compare the extracted data with database queries for deeper cross-referencing.
+
 ## Anti-Patterns (Avoid)
 
 - Never generate raw SQL directly - always use call_alloydb_agent

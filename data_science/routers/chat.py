@@ -35,6 +35,7 @@ class MessagePayload(BaseModel):
     thinking: str | None = None
     tool_calls: dict | list | None = None
     activity_events: dict | list | None = None
+    attachments: list | None = None
     sort_order: int
 
 
@@ -123,6 +124,7 @@ async def get_session(session_id: str):
                 "thinking": m.thinking,
                 "toolCalls": m.tool_calls,
                 "activityEvents": m.activity_events,
+                "attachments": m.attachments,
                 "sortOrder": m.sort_order,
                 "createdAt": m.created_at.isoformat(),
             }
@@ -190,6 +192,7 @@ async def batch_upsert_messages(body: BatchMessagesRequest):
                 existing.thinking = msg.thinking
                 existing.tool_calls = msg.tool_calls
                 existing.activity_events = msg.activity_events
+                existing.attachments = msg.attachments
             else:
                 session.add(
                     ChatMessage(
@@ -200,6 +203,7 @@ async def batch_upsert_messages(body: BatchMessagesRequest):
                         thinking=msg.thinking,
                         tool_calls=msg.tool_calls,
                         activity_events=msg.activity_events,
+                        attachments=msg.attachments,
                         sort_order=msg.sort_order,
                     )
                 )

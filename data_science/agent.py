@@ -53,6 +53,7 @@ from .tools import (
     get_predefined_stats_catalog,
     get_stats_schema_summary,
     get_weather_data,
+    read_uploaded_file,
     search_policy_rag_engine,
 )
 
@@ -214,6 +215,7 @@ def create_root_agent() -> LlmAgent:
         search_policy_rag_engine,
         get_stats_schema_summary,
         get_predefined_stats_catalog,
+        read_uploaded_file,
         google_search,
     ]
 

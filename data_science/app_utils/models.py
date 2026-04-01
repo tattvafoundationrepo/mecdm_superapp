@@ -61,6 +61,7 @@ class ChatMessage(Base):
     thinking: Mapped[str | None] = mapped_column(Text)
     tool_calls: Mapped[dict | None] = mapped_column(JSONB)
     activity_events: Mapped[dict | None] = mapped_column(JSONB)
+    attachments: Mapped[list | None] = mapped_column(JSONB)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, server_default=func.now()

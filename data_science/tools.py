@@ -9,6 +9,7 @@ from google.adk.tools.agent_tool import AgentTool
 from google.genai import Client
 from google.genai.types import HttpOptions
 
+from .services.file_processor import UPLOAD_BUCKET_NAME, read_extracted_text
 from .sub_agents import alloydb_agent
 from .sub_agents.alloydb.tools import get_toolbox_client
 from .utils.utils import USER_AGENT
@@ -975,4 +976,51 @@ async def generate_stat_query(
     except Exception as e:
         logger.error("generate_stat_query error: %s", e)
         return f"Error: {e}"
+
+
+async def read_uploaded_file(
+    gcs_uri: str,
+    tool_context: ToolContext,
+) -> str:
+    """Read the content of a previously uploaded file from Google Cloud Storage.
+
+    For documents (DOCX, PPTX, XLSX), returns the extracted text content.
+    For images and PDFs, the content is already provided as multimodal input
+    in the conversation — this tool confirms that.
+
+    Use this tool when a user references an uploaded Office document and you
+    need to read its contents for analysis.
+
+    Args:
+        gcs_uri: The GCS URI of the uploaded file (gs://bucket/path/to/file).
+
+    Returns:
+        The text content of the file, or a note about multimodal content.
+    """
+    expected_prefix = f"gs://{UPLOAD_BUCKET_NAME}/"
+    if not gcs_uri.startswith(expected_prefix):
+        return f"Error: Invalid GCS URI. Must start with {expected_prefix}"
+
+    # Determine file type from extension
+    uri_lower = gcs_uri.lower()
+    multimodal_exts = (".pdf", ".png", ".jpg", ".jpeg", ".webp")
+    if any(uri_lower.endswith(ext) for ext in multimodal_exts):
+        return (
+            "This file (image or PDF) was already provided as multimodal content "
+            "in the user's message. You can analyze it directly from the conversation "
+            "context — no need to read it separately."
+        )
+
+    try:
+        text = read_extracted_text(gcs_uri)
+        if len(text) > 50000:
+            text = text[:50000] + "\n\n... [Content truncated at 50,000 characters]"
+        return text
+    except FileNotFoundError as e:
+        return f"Error: {e}"
+    except ValueError as e:
+        return f"Error: {e}"
+    except Exception as e:
+        logger.exception("read_uploaded_file error for %s", gcs_uri)
+        return f"Error reading file: {e}"
 
