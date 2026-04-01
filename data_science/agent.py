@@ -18,6 +18,7 @@ Environment Variables:
     AGENT_PERSONA: Persona type (decision_maker|frontline_worker|citizen|analyst)
 """
 
+import asyncio
 import logging
 import os
 from typing import Optional, Dict, Any
@@ -165,13 +166,23 @@ async def save_session_to_memory(callback_context: CallbackContext):
     This callback triggers memory generation so the agent can recall
     information from past conversations via PreloadMemoryTool.
     When no MemoryService is configured (e.g. tests), this is a no-op.
+
+    Runs as a fire-and-forget background task so it doesn't block the response.
     """
     memory_service = callback_context._invocation_context.memory_service
     if memory_service is None:
         return None
     session = callback_context._invocation_context.session
-    await memory_service.add_session_to_memory(session)
+    asyncio.create_task(_persist_memory(memory_service, session))
     return None
+
+
+async def _persist_memory(memory_service, session):
+    """Background task to persist memory without blocking the response."""
+    try:
+        await memory_service.add_session_to_memory(session)
+    except Exception as e:
+        logger.warning("Background memory persistence failed: %s", e)
 
 
 # ============================================================================
