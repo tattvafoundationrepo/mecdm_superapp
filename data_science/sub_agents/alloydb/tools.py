@@ -83,7 +83,7 @@ def get_toolbox_toolset():
     """Get MCP Toolbox toolset."""
     global toolbox_toolset
     if toolbox_toolset is None:
-        toolbox_toolset = get_toolbox_client().load_toolset(toolset_name=ALLOYDB_TOOLSET)
+        toolbox_toolset = get_toolbox_client().load_toolset(name=ALLOYDB_TOOLSET)
         tool_names = [t.__name__ for t in toolbox_toolset]
         logger.info("Loaded toolset '%s' with tools: %s", ALLOYDB_TOOLSET, tool_names)
     return toolbox_toolset

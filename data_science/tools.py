@@ -9,137 +9,27 @@ from google.adk.tools.agent_tool import AgentTool
 from google.genai import Client
 from google.genai.types import HttpOptions
 
-from .app_utils.sql_validator import validate_sql
 from .services.file_processor import UPLOAD_BUCKET_NAME, read_extracted_text
 from .sub_agents import alloydb_agent
-from .sub_agents.alloydb.tools import get_table_schema, get_toolbox_client
+from .sub_agents.alloydb.tools import get_toolbox_client
 from .utils.utils import USER_AGENT
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Fast-path: single-LLM-call data lookup (skips multi-agent pipeline)
-# ---------------------------------------------------------------------------
-
-_QUICK_SQL_PROMPT = """
-You are a PostgreSQL SQL generator. Translate the question into a single SELECT query.
-
-Rules:
-- Reference tables as "table_name" (double-quoted, case-sensitive).
-- Use ONLY columns listed in the schema below. Do NOT invent column names.
-- Minimize joins. Ensure matching data types on join columns.
-- Include all non-aggregated SELECT columns in GROUP BY.
-- Apply WHERE/HAVING filters to minimize returned rows.
-- In mother_journeys and anc_visits, ALL columns are TEXT type — cast to numeric/date as needed.
-- District names in mother_journeys/anc_visits are UPPERCASE (e.g., 'EAST KHASI HILLS').
-- Use integer code joins (district_code_lgd, block_code_lgd) instead of name joins when possible.
-- Output ONLY the SQL query, no markdown fences, no explanation.
-
-Schema:
-```
-{SCHEMA}
-```
-
-Question: {QUESTION}
-""".strip()
-
-
-async def quick_data_lookup(
-    question: str,
-    table_names: str,
-    tool_context: ToolContext,
-) -> dict:
-    """Fast single-step data retrieval — generates SQL and executes it in one call.
-
-    Use this for simple, direct data questions that target one or two tables
-    and need no complex analysis (e.g., counts, sums, listings, filters).
-    For complex multi-table joins, analytics, or ambiguous questions, use
-    call_alloydb_agent instead.
-
-    Args:
-        question: Natural language question about the data.
-        table_names: Comma-separated table names to query (e.g. "mother_journeys"
-            or "mother_journeys,districts"). You MUST specify the relevant tables
-            based on the schema summary you already have.
-        tool_context: ADK tool context (carries database_settings in state).
-
-    Returns:
-        dict with 'query_result', 'error_message', and 'sql' keys.
-    """
-    result = {"query_result": "", "error_message": "", "sql": ""}
-
-    if not table_names or not table_names.strip():
-        result["error_message"] = (
-            "table_names is required. Specify which tables to query."
-        )
-        return result
-
-    # 1. Fetch detailed column schema for the specified tables (cached, fast)
-    try:
-        detailed_schema = get_table_schema(table_names)
-    except Exception as e:
-        result["error_message"] = (
-            f"Could not fetch schema for '{table_names}': {e}. "
-            "Try call_alloydb_agent."
-        )
-        return result
-
-    if not detailed_schema:
-        result["error_message"] = (
-            f"No schema found for '{table_names}'. Check table names."
-        )
-        return result
-
-    # 2. Single LLM call: question + detailed column schema → SQL
-    prompt = _QUICK_SQL_PROMPT.format(SCHEMA=detailed_schema, QUESTION=question)
-
-    llm_client = _get_v2_llm_client()
-    response = llm_client.models.generate_content(
-        model=os.getenv("BASELINE_NL2SQL_MODEL", ""),
-        contents=prompt,
-        config={"temperature": 0.1},
-    )
-
-    sql = (response.text or "").replace("```sql", "").replace("```", "").strip()
-    if not sql:
-        result["error_message"] = "LLM returned empty SQL. Try call_alloydb_agent."
-        return result
-
-    result["sql"] = sql
-    logger.info("quick_data_lookup SQL: %s", sql)
-
-    # 3. Validate SQL (reuse existing pglast validator)
-    is_safe, reason = validate_sql(sql)
-    if not is_safe:
-        result["error_message"] = f"Blocked: {reason}. Try call_alloydb_agent."
-        return result
-
-    # 4. Execute via MCP Toolbox
-    try:
-        execute_sql_tool = get_toolbox_client().load_tool("execute_sql")
-        rows = execute_sql_tool(sql)
-
-        # MCP Toolbox returns error strings instead of raising exceptions
-        if isinstance(rows, str) and rows.lower().startswith("error"):
-            result["error_message"] = f"{rows}. Try call_alloydb_agent."
-        elif rows:
-            result["query_result"] = rows
-            tool_context.state["alloydb_query_result"] = rows
-            tool_context.state["sql_query"] = sql
-        else:
-            result["error_message"] = "Query executed successfully (no results)."
-    except Exception as e:
-        result["error_message"] = f"Query error: {e}. Try call_alloydb_agent."
-
-    return result
 
 
 async def call_alloydb_agent(
     question: str,
     tool_context: ToolContext,
 ):
-    """Tool to call alloydb database (nl2sql) agent."""
+    """Query AlloyDB using the full NL2SQL pipeline with automatic error correction.
+
+    Use this for complex queries requiring multi-table joins, ambiguous table
+    selection, or when execute_sql returned an error. The sub-agent
+    selects tables, generates SQL, executes it, and retries on failure.
+
+    Args:
+        question: Natural language data question.
+    """
     logger.debug("call_alloydb_agent: %s", question)
 
     agent_tool = AgentTool(agent=alloydb_agent)
@@ -357,7 +247,6 @@ async def export_data_to_csv(data_json: str, filename: str, tool_context: ToolCo
         return f"Error exporting data: {e}"
 
 
-
 async def find_nearest_facilities(
     from_village: str,
     to_type: str = "ANY_FACILITY",
@@ -428,24 +317,31 @@ _stats_available_tables: list[str] | None = None
 
 
 def get_stats_available_tables() -> list[str]:
-    """Fetch all tables from MCP Toolbox, exclude blocked ones, cache the result."""
+    """Extract available table names from the schema summary already loaded at startup."""
     global _stats_available_tables
     if _stats_available_tables is not None:
         return _stats_available_tables
 
     try:
-        list_tables_tool = get_toolbox_client().load_tool("list_tables")
-        raw_schema = list_tables_tool(schema_names="public", table_names="")
+        # Use the schema summary already loaded by get_database_settings() at startup
+        # (via list_table_summaries). This avoids a separate MCP call that fails with
+        # empty table_names parameter.
+        from .sub_agents.alloydb.tools import get_database_settings
+
+        settings = get_database_settings()
+        schema_summary_raw = settings.get("schema_summary", "")
 
         all_tables: list[str] = []
-        if isinstance(raw_schema, str):
+        if isinstance(schema_summary_raw, str) and schema_summary_raw:
             import json as _json
             try:
-                tables_data = _json.loads(raw_schema)
+                tables_data = _json.loads(schema_summary_raw)
             except _json.JSONDecodeError:
                 tables_data = []
+        elif isinstance(schema_summary_raw, list):
+            tables_data = schema_summary_raw
         else:
-            tables_data = raw_schema
+            tables_data = []
 
         if isinstance(tables_data, list):
             for t in tables_data:
@@ -466,23 +362,36 @@ def get_stats_available_tables() -> list[str]:
         return _stats_available_tables
 
     except Exception as e:
-        logger.error("Failed to fetch tables from MCP: %s", e)
+        logger.error(
+            "Failed to extract stats tables from schema summary: %s", e)
         return []
 
+
 PREDEFINED_STATS_CATALOG = [
-    {"id": "total-registrations", "name": "Total Registrations", "category": "maternal-health", "description": "Total maternal registrations across all districts"},
-    {"id": "institutional-delivery-rate", "name": "Institutional Delivery Rate", "category": "maternal-health", "description": "Percentage of deliveries at health institutions"},
-    {"id": "health-facilities-count", "name": "Health Facilities", "category": "infrastructure", "description": "Total health facilities across all districts"},
-    {"id": "awc-count", "name": "Anganwadi Centres", "category": "infrastructure", "description": "Total Anganwadi centres across all districts"},
-    {"id": "district-registrations", "name": "District-wise Registrations", "category": "maternal-health", "description": "Total maternal registrations by district (bar chart)"},
-    {"id": "monthly-registrations-trend", "name": "Monthly Registration & Delivery Trends", "category": "maternal-health", "description": "Monthly trends of registrations and deliveries (area chart)"},
-    {"id": "facility-type-distribution", "name": "Facility Type Distribution", "category": "infrastructure", "description": "Health facility count by type (pie chart)"},
-    {"id": "block-delivery-rate", "name": "Top 20 Blocks: Institutional Deliveries", "category": "maternal-health", "description": "Blocks with highest institutional deliveries (bar chart)"},
-    {"id": "maternal-deaths-district", "name": "Maternal Deaths by District", "category": "maternal-health", "description": "Total reported maternal deaths by district (bar chart)"},
-    {"id": "monthly-anc-coverage", "name": "Monthly ANC Coverage", "category": "maternal-health", "description": "Monthly ANC visits, IFA recipients, and TT doses (line chart)"},
+    {"id": "total-registrations", "name": "Total Registrations", "category": "maternal-health",
+        "description": "Total maternal registrations across all districts"},
+    {"id": "institutional-delivery-rate", "name": "Institutional Delivery Rate",
+        "category": "maternal-health", "description": "Percentage of deliveries at health institutions"},
+    {"id": "health-facilities-count", "name": "Health Facilities", "category": "infrastructure",
+        "description": "Total health facilities across all districts"},
+    {"id": "awc-count", "name": "Anganwadi Centres", "category": "infrastructure",
+        "description": "Total Anganwadi centres across all districts"},
+    {"id": "district-registrations", "name": "District-wise Registrations", "category": "maternal-health",
+        "description": "Total maternal registrations by district (bar chart)"},
+    {"id": "monthly-registrations-trend", "name": "Monthly Registration & Delivery Trends",
+        "category": "maternal-health", "description": "Monthly trends of registrations and deliveries (area chart)"},
+    {"id": "facility-type-distribution", "name": "Facility Type Distribution",
+        "category": "infrastructure", "description": "Health facility count by type (pie chart)"},
+    {"id": "block-delivery-rate", "name": "Top 20 Blocks: Institutional Deliveries",
+        "category": "maternal-health", "description": "Blocks with highest institutional deliveries (bar chart)"},
+    {"id": "maternal-deaths-district", "name": "Maternal Deaths by District", "category": "maternal-health",
+        "description": "Total reported maternal deaths by district (bar chart)"},
+    {"id": "monthly-anc-coverage", "name": "Monthly ANC Coverage", "category": "maternal-health",
+        "description": "Monthly ANC visits, IFA recipients, and TT doses (line chart)"},
 ]
 
-_NUMERIC_TYPES = {"bigint", "integer", "smallint", "numeric", "double precision", "real"}
+_NUMERIC_TYPES = {"bigint", "integer", "smallint",
+                  "numeric", "double precision", "real"}
 _META_COLUMNS = {"created_at", "updated_at", "objectid", "geom", "geometry"}
 _GEOMETRY_TYPES = {"geometry", "geography", "USER-DEFINED"}
 
@@ -520,7 +429,8 @@ async def get_stats_schema_summary(tool_context: ToolContext) -> str:
 
         list_tables_tool = get_toolbox_client().load_tool("list_tables")
         table_names_str = ",".join(available_tables)
-        raw_schema = list_tables_tool(schema_names="public", table_names=table_names_str)
+        raw_schema = list_tables_tool(
+            schema_names="public", table_names=table_names_str)
 
         # Parse the raw schema output into a structured format
         if isinstance(raw_schema, str):
@@ -538,7 +448,8 @@ async def get_stats_schema_summary(tool_context: ToolContext) -> str:
         summary = {}
         if isinstance(tables_data, list):
             for table_info in tables_data:
-                tname = table_info.get("table_name") or table_info.get("name", "")
+                tname = table_info.get(
+                    "table_name") or table_info.get("name", "")
                 if tname not in available_set:
                     continue
                 columns = []
@@ -547,7 +458,8 @@ async def get_stats_schema_summary(tool_context: ToolContext) -> str:
                     col_type = col.get("data_type") or col.get("type", "")
                     role = _infer_column_role(col_name, col_type)
                     if role:
-                        columns.append({"name": col_name, "type": col_type, "role": role})
+                        columns.append(
+                            {"name": col_name, "type": col_type, "role": role})
                 if columns:
                     summary[tname] = {"columns": columns}
         elif isinstance(tables_data, dict):
@@ -560,7 +472,8 @@ async def get_stats_schema_summary(tool_context: ToolContext) -> str:
                     col_type = col.get("data_type") or col.get("type", "")
                     role = _infer_column_role(col_name, col_type)
                     if role:
-                        columns.append({"name": col_name, "type": col_type, "role": role})
+                        columns.append(
+                            {"name": col_name, "type": col_type, "role": role})
                 if columns:
                     summary[tname] = {"columns": columns}
 
@@ -856,7 +769,8 @@ def _compile_stat_query_v2_to_sql(query: dict) -> str:
             h_op = _OPERATOR_SQL.get(h.get("operator", "eq"), "=")
             h_val = h.get("value")
             expr = next(
-                (cc["expression"] for cc in computed_columns if cc["alias"] == h["column"]),
+                (cc["expression"]
+                 for cc in computed_columns if cc["alias"] == h["column"]),
                 _qi(h["column"]),
             )
             if isinstance(h_val, str):
@@ -944,18 +858,11 @@ async def generate_stat_query(
     question: str,
     tool_context: ToolContext,
 ) -> str:
-    """Generate a StatQuery V2 JSON for frontend visualization AFTER data has been retrieved.
+    """Build a StatQuery V2 JSON for frontend chart/table rendering.
 
-    IMPORTANT: Do NOT call this as your first tool. Always retrieve data first using
-    quick_data_lookup or call_alloydb_agent, then call this tool to create the
-    frontend visualization JSON.
-
-    Use this tool for: building interactive charts, KPI cards, and dashboard widgets
-    from data you have already retrieved.
-
-    Returns both the validated StatQuery V2 JSON and the actual query results.
-    Use the STAT_QUERY_JSON in your mecdm_stat block (as the "query" field)
-    and the QUERY_RESULTS for your textual analysis.
+    PREREQUISITE: Requires data to already be retrieved and cached in tool_context state via
+    execute_sql or call_alloydb_agent. This is a visualization
+    formatting tool, not a data retrieval tool.
 
     Args:
         question: The natural language question about health data.
@@ -965,6 +872,15 @@ async def generate_stat_query(
         followed by actual query results inside <QUERY_RESULTS> tags.
         On error, returns an error message string.
     """
+    # Runtime guard: reject if called before data retrieval
+    if ("alloydb_query_result" not in tool_context.state
+            and "alloydb_agent_output" not in tool_context.state):
+        return (
+            "Error: No data retrieved yet. Call execute_sql or "
+            "call_alloydb_agent first to get the data, then call "
+            "generate_stat_query to create the visualization."
+        )
+
     try:
         schema_summary = await get_stats_schema_summary(tool_context)
 
@@ -982,7 +898,8 @@ async def generate_stat_query(
         raw_text = (response.text or "").strip()
         # Strip markdown fencing if the LLM added it
         if raw_text.startswith("```"):
-            raw_text = raw_text.split("\n", 1)[1] if "\n" in raw_text else raw_text
+            raw_text = raw_text.split(
+                "\n", 1)[1] if "\n" in raw_text else raw_text
         if raw_text.endswith("```"):
             raw_text = raw_text.rsplit("```", 1)[0].strip()
         if raw_text.startswith("json"):
@@ -1051,10 +968,12 @@ async def generate_stat_query(
                 if rows and isinstance(rows, list) and len(rows) > 0:
                     # Limit to first 50 rows for context
                     preview_rows = rows[:50]
-                    headers = list(preview_rows[0].keys()) if isinstance(preview_rows[0], dict) else []
+                    headers = list(preview_rows[0].keys()) if isinstance(
+                        preview_rows[0], dict) else []
                     if headers:
                         header_line = "| " + " | ".join(headers) + " |"
-                        sep_line = "| " + " | ".join("---" for _ in headers) + " |"
+                        sep_line = "| " + \
+                            " | ".join("---" for _ in headers) + " |"
                         row_lines = []
                         for row in preview_rows:
                             vals = []
@@ -1068,7 +987,8 @@ async def generate_stat_query(
                                     v = str(v)
                                 vals.append(v)
                             row_lines.append("| " + " | ".join(vals) + " |")
-                        table_str = "\n".join([header_line, sep_line] + row_lines)
+                        table_str = "\n".join(
+                            [header_line, sep_line] + row_lines)
                         total_note = ""
                         if len(rows) > 50:
                             total_note = f"\n(Showing 50 of {len(rows)} rows)"
@@ -1081,7 +1001,8 @@ async def generate_stat_query(
                 data_section = "\n<QUERY_RESULTS>\nQuery returned no rows.\n</QUERY_RESULTS>"
 
         except Exception as exec_err:
-            logger.warning("generate_stat_query execution failed (non-fatal): %s", exec_err)
+            logger.warning(
+                "generate_stat_query execution failed (non-fatal): %s", exec_err)
             data_section = f"\n<QUERY_RESULTS>\nExecution error (use the JSON for frontend rendering): {exec_err}\n</QUERY_RESULTS>"
 
         return f"<STAT_QUERY_JSON>\n{query_json}\n</STAT_QUERY_JSON>{data_section}"
@@ -1130,7 +1051,8 @@ async def read_uploaded_file(
     try:
         text = read_extracted_text(gcs_uri)
         if len(text) > 50000:
-            text = text[:50000] + "\n\n... [Content truncated at 50,000 characters]"
+            text = text[:50000] + \
+                "\n\n... [Content truncated at 50,000 characters]"
         return text
     except FileNotFoundError as e:
         return f"Error: {e}"
@@ -1139,4 +1061,3 @@ async def read_uploaded_file(
     except Exception as e:
         logger.exception("read_uploaded_file error for %s", gcs_uri)
         return f"Error reading file: {e}"
-

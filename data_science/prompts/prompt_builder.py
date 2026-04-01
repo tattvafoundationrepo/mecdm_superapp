@@ -265,169 +265,81 @@ High_Risk_Rate = high_risk_registrations * 100.0 / total_registrations
 """.strip()
 
 
-def get_tool_usage_block(include_mcp: bool = True) -> str:
+def get_tool_usage_block(include_mcp: bool = True) -> str:  # noqa: ARG001
     """Return tool usage instructions."""
     base = """
 <TOOL_USAGE>
 
-## Primary Data Tools
+## Tool Routing
 
-### `quick_data_lookup` (FAST PATH — prefer this for simple queries)
-Use for: Simple, direct data questions targeting 1-2 tables
-Input: `question` (natural language) + `table_names` (comma-separated table names you identify from the schema summary)
-Returns: Query results directly (single LLM call + execute — no sub-agent overhead)
+### Step 1: Retrieve Data (ALWAYS do this first for data questions)
 
-**You MUST supply `table_names`** — look at the schema summary you already have and pick the relevant table(s).
+You have direct access to MCP database tools. For simple queries, use them directly instead of delegating to sub-agents.
 
-**Use when the question is:**
-- A straightforward count, sum, average, or listing
-- Filtering or looking up records from one or two obvious tables
-- Simple aggregations with GROUP BY
+**Simple queries (1-2 tables) — use MCP tools directly (PREFERRED, fastest path):**
+1. You already have the schema summary loaded in your context (table names + descriptions). Use it to pick the relevant table(s).
+2. Call `list_tables(schema_names="public", table_names="<chosen_table>")` to get the exact column names and types.
+3. Write a PostgreSQL SELECT query using ONLY the columns from step 2, then call `execute_sql(<your_sql>)`.
 
-Examples:
-- "How many deliveries in West Garo Hills?" → `table_names="mother_journeys"`
-- "List all districts" → `table_names="districts"`
-- "Total ANC visits in January 2025" → `table_names="anc_visits"`
-- "Average IDR by district" → `table_names="mother_journeys"`
-- "Count of health facilities in East Khasi Hills" → `table_names="health_facilities"`
+If you are unsure which table to use, call `list_table_summaries(schema_names="public")` first.
+If `execute_sql` returns an error, fix your SQL using the error message and retry once. If it still fails, fall back to `call_alloydb_agent`.
 
-If quick_data_lookup returns an error, fall back to call_alloydb_agent.
+**Complex queries (3+ tables, ambiguous, or repeated failures) — delegate:**
+Call `call_alloydb_agent(question)` — it handles table selection, SQL generation, and error recovery automatically.
 
-### `call_alloydb_agent` (FULL PIPELINE — for complex queries)
-Use for: Complex data retrieval requiring multi-table joins, ambiguous questions, or when quick_data_lookup fails
-Input: Natural language question about data
-Returns: Structured data or SQL results
+**SQL rules when writing queries directly:**
+- Double-quote table names: `"mother_journeys"`, `"anc_visits"`
+- In mother_journeys and anc_visits, ALL columns are TEXT — cast with `::NUMERIC` or `::DATE`
+- District names in mother_journeys/anc_visits are UPPERCASE (e.g., 'EAST KHASI HILLS')
+- COMMON MISTAKES: mother_journeys uses "district" (not "district_name"), "baby_weight_kg" (not "child_weight_kgs"). subdistricts uses "blockname" (not "block_name").
+- Use integer code joins (district_code_lgd, block_code_lgd) over name joins when possible
+- Always include WHERE filters or LIMIT — never fetch entire tables
+- Never expose mother_id, names, or phone numbers
 
-**Use when the question involves:**
-- Joining 3+ tables or ambiguous table selection
-- Complex subqueries, CTEs, or window functions
-- Questions where you're unsure which tables to use
-- Fallback after quick_data_lookup error
+### Step 2: Analyze (optional — only if Python computation needed)
+| Need | Tool |
+|---|---|
+| Trends, correlations, rankings via Python | `call_analytics_agent(question)` |
 
-### `call_analytics_agent`
-Use for: Complex analysis, predictions, statistical computations
-Input: Data from previous retrieval + analysis request
-Returns: Analysis results with methodology
+### Step 3: Visualize (optional — only if user wants a chart/dashboard)
+| Need | Tool |
+|---|---|
+| Frontend chart/table JSON (StatQuery V2) | `generate_stat_query(question)` |
 
-When to use:
-- Trend analysis across time periods
-- Correlation between indicators
-- Ranking with computed metrics
-- Aggregations requiring Python (pandas, numpy)
+Embed the returned STAT_QUERY_JSON directly as the "query" field in your mecdm_stat block.
 
-### `generate_stat_query` (VISUALIZATION ONLY — call AFTER data retrieval)
-Use for: Building StatQuery V2 JSON for frontend charts/tables
-Input: Natural language question
-Returns: Two sections:
-  - `<STAT_QUERY_JSON>`: The validated StatQuery V2 JSON for frontend visualization
-  - `<QUERY_RESULTS>`: Actual data rows from executing the query
+### Step 4: Recommend (only when data shows red flags or user asks for policy)
+| Need | Tool |
+|---|---|
+| Policy grounding for recommendations | `search_policy_rag_engine(query)` |
 
-**DO NOT use this as your first/primary data retrieval tool.**
-Always retrieve data FIRST with `quick_data_lookup` or `call_alloydb_agent`,
-then call `generate_stat_query` to create the visualization JSON.
-
-IMPORTANT workflow:
-- Use the QUERY_RESULTS data for your textual insights and analysis — never guess or assume data
-- Embed the STAT_QUERY_JSON directly as the "query" field in your mecdm_stat block
-- Do NOT rewrite or modify the query JSON — only add "chart" and "name" wrapper around it
-
-Preferred for:
-- KPI cards, bar charts, line charts
-- Queries users might want to save
-- Structured aggregations on stats-eligible tables
-
+Do NOT call search_policy_rag_engine for simple factual questions like "list districts".
 
 ## Supporting Tools
-
 | Tool | Use Case |
-|------|----------|
-| `get_current_datetime` | Relative date calculations |
-| `get_weather_data` | Current weather context |
-| `get_historical_weather_data` | Weather trend analysis |
-| `find_nearest_facilities` | Spatial queries for closest PHC/AWC |
-| `search_policy_rag_engine` | MECDM policy documents — **call after every data query to ground recommendations** |
-| `get_stats_schema_summary` | Discover table columns |
+|---|---|
+| `find_nearest_facilities` | Spatial: nearest PHC/AWC to a village |
+| `get_current_datetime` | Resolve "today", "last month" |
+| `get_weather_data` / `get_historical_weather_data` | Current or past weather |
+| `export_data_to_csv` | Export data as CSV file |
+| `get_stats_schema_summary` | Discover table columns for stat queries |
 | `get_predefined_stats_catalog` | Pre-built KPI definitions |
-| `export_data_to_csv` | Data export for users |
+| `read_uploaded_file` | Read uploaded DOCX/PPTX/XLSX from GCS |
 | `google_search` | External fact verification |
 
-## Workflow Pattern (Follow This Order STRICTLY)
-
-```
-1. PLAN       -> Identify tables and relationships needed
-2. RETRIEVE   -> SIMPLE query? quick_data_lookup(table_names=...) : call_alloydb_agent
-3. ANALYZE    -> call_analytics_agent if trends/stats computation needed
-4. VISUALIZE  -> generate_stat_query to build frontend-ready chart/table JSON
-5. RECOMMEND  -> search_policy_rag_engine to ground recommendations in policy
-6. RESPOND    -> Markdown with findings + visualization blocks + recommendation table
-```
-
-**CRITICAL: Always start at Step 2 (RETRIEVE data first).** Never skip to Step 4
-(generate_stat_query) without retrieving data first. generate_stat_query is for
-visualization JSON — it is NOT a data retrieval shortcut.
-
-### Step 2: Smart Data Routing (CRITICAL for performance)
-**Default to `quick_data_lookup`** for simple questions (counts, sums, listings, filters
-on 1-2 tables). This is ~3x faster because it uses a single LLM call instead of the
-full multi-agent pipeline.
-
-**Fall back to `call_alloydb_agent`** only when:
-- The question requires 3+ table joins or complex logic
-- You're unsure which tables are needed
-- `quick_data_lookup` returned an error
-
-### Steps 2-3: Data Retrieval & Analysis (FIRST)
-After retrieving data (via either path), if the query needs trend analysis,
-correlations, or complex computation, pass the results to `call_analytics_agent`.
-These steps give you the ACTUAL numbers you'll reference in your response.
-
-### Step 4: Visualization (AFTER data is retrieved)
-Call `generate_stat_query` to produce the StatQuery V2 JSON for frontend rendering.
-This creates the interactive chart/table the user sees. Use the data from steps 2-3
-to inform your textual insights — do NOT rely solely on generate_stat_query results.
-
-### Step 5: Policy Recommendations (LAST, before composing response)
-ALWAYS call `search_policy_rag_engine` AFTER you have data insights. Use the findings
-to craft a targeted policy search query. Examples:
-- Data shows low IDR → search "institutional delivery incentives policy Meghalaya"
-- High maternal deaths → search "maternal mortality reduction guidelines MECDM"
-- Low immunization → search "immunization program guidelines Meghalaya"
-
-The RAG results go into the Recommendations table in your final response.
-
 ## Uploaded Files
+- **Images and PDFs**: Provided as multimodal content — analyze directly.
+- **Office documents (DOCX, PPTX, XLSX)**: Use `read_uploaded_file` with the GCS URI.
 
-Users may attach files (PDF, DOCX, PPTX, XLSX, images) to their messages for analysis.
-
-- **Images and PDFs**: These are provided directly as multimodal content in the message. You can see and analyze them directly — describe what you see, extract data, answer questions about the content.
-- **Office documents (DOCX, PPTX, XLSX)**: The text has been pre-extracted. Use the `read_uploaded_file` tool with the GCS URI (provided in the message as `[Attached: filename — ... at gs://...]`) to access the full extracted content.
-- When a user references an attached file, acknowledge it and provide thorough analysis.
-- For data in XLSX files, you can compare the extracted data with database queries for deeper cross-referencing.
-
-## Anti-Patterns (Avoid)
-
-- Never generate raw SQL directly - always use quick_data_lookup or call_alloydb_agent
-- Never use matplotlib - use mecdm_viz JSON blocks only
-- Never fetch entire tables - always include WHERE filters
-- Never join tables without checking CROSS_DATASET_RELATIONS
-- Never expose mother_id or personal identifiers in results
-- After analysis completes, summarize all results with appropriate visualization blocks.
-- Data from previous steps is available for follow-up analysis via `call_analytics_agent`.
+## Rules
+- ALWAYS retrieve data (Step 1) before visualizing (Step 3)
+- For simple queries: `list_table_summaries` → `list_tables` → `execute_sql`
+- For complex queries: `call_alloydb_agent`
+- Never expose mother_id, names, or phone numbers in results
 
 </TOOL_USAGE>
 """.strip()
 
-    if include_mcp:
-        base += """
-
-## MCP Toolbox Integration
-
-When using the Toolbox MCP server for AlloyDB access:
-- Connection is managed by the MCP server (no direct psycopg2)
-- Use the provided database tools through MCP protocol
-- Schema information is available via `get_stats_schema_summary`
-- All queries are parameterized for security
-"""
     return base
 
 
@@ -612,49 +524,21 @@ Multiple blocks per response allowed (e.g. stat_cards for KPIs then chart for tr
 RESPONSE_FORMAT_BLOCK = """
 <RESPONSE_FORMAT>
 
-Structure all data responses with these sections:
-
-### **Result**
+Structure all data responses:
 Lead with the key insight.
 
 ### **Visualizations**
 Include appropriate mecdm_stat, mecdm_viz, or mecdm_map blocks. Multiple blocks allowed.
 
-### **Recommendations**
+### **Recommendations** (only when policy-relevant)
+Format: **<Priority>**: Should include these <Finding with data> <Action> (<Policy citation>)
+Priorities: Critical, Warning, or Moderate. Max 3-5 items, 2 lines each.
 
-Using query results and `search_policy_rag_engine`, produce 3–5 concise recommendations.
-
-Strict output:
-- Numbered list only
-- Max 2 lines per item
-- No extra text
-
-Format:
-**<Priority>**: <Finding with real data> → <Policy citation or "Data-driven"> → <Single action>
-
-Constraints:
-- Priorities: Critical, Warning, or Moderate
-- Use exact values from data (no approximations)
-- Policy citation must include document name + section
-- Avoid repeating the same policy unless necessary
-- Action must be specific, implementable, and verb-first
----
-
-## Response Guidelines
-
-1. **Be Concise**: Decision makers need quick answers, not lengthy explanations
-2. **Show, Don't Tell**: Visualizations before prose
-3. **Highlight Anomalies**: Call out districts/blocks that exceed red flag thresholds
-4. **Include Context**: Compare to state average, NFHS benchmarks, or previous period
-5. **Ground in Policy**: Always pair findings with relevant policy recommendations from RAG
-6. **Be Honest About Limitations**: Note data quality issues when relevant
-
-## Formatting Rules
-
-- Use Markdown headers for sections
-- Round percentages to 2 decimal places
-- Format large numbers with commas (1,234,567)
-- Use ISO dates (YYYY-MM) for time periods
+Guidelines:
+- Be concise — visualizations before prose
+- Highlight districts/blocks exceeding red flag thresholds
+- Compare to state average or NFHS benchmarks when relevant
+- Format: commas for thousands, 2 decimal places for percentages, YYYY-MM for dates
 
 </RESPONSE_FORMAT>
 """.strip()

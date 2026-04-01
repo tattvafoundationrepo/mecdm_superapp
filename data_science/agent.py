@@ -42,6 +42,7 @@ from .prompts.prompt_builder import (
 )
 from .sub_agents.alloydb.tools import (
     get_database_settings as get_alloydb_database_settings,
+    get_toolbox_toolset,
 )
 from .tools import (
     call_alloydb_agent,
@@ -54,7 +55,6 @@ from .tools import (
     get_predefined_stats_catalog,
     get_stats_schema_summary,
     get_weather_data,
-    quick_data_lookup,
     read_uploaded_file,
     search_policy_rag_engine,
 )
@@ -214,28 +214,29 @@ def create_root_agent() -> LlmAgent:
         prompt_config.persona.value,
     )
 
-    # Assemble tools list
+    # Assemble tools list — ORDER MATTERS: Gemini weights tool position.
+    # Data retrieval first, visualization after, supporting tools last.
     tools = [
-        PreloadMemoryTool(),  # Retrieve long-term memories at turn start
+        PreloadMemoryTool(),
+        # --- Data retrieval (try first) ---
+        *get_toolbox_toolset(),
+        call_alloydb_agent,
+        # --- Analysis (on retrieved data) ---
         call_analytics_agent,
-        find_nearest_facilities,
+        # --- Visualization (AFTER retrieval) ---
         generate_stat_query,
+        # --- Supporting tools ---
+        find_nearest_facilities,
+        search_policy_rag_engine,
         get_current_datetime,
         get_weather_data,
         get_historical_weather_data,
         export_data_to_csv,
-        search_policy_rag_engine,
         get_stats_schema_summary,
         get_predefined_stats_catalog,
         read_uploaded_file,
         google_search,
     ]
-
-    # Add dataset-specific tools
-    for dataset in _config._raw_dataset_config.get("datasets", []):
-        if dataset["type"] == "alloydb":
-            tools.append(quick_data_lookup)
-            tools.append(call_alloydb_agent)
 
     agent = LlmAgent(
         model=os.getenv("ROOT_AGENT_MODEL", "gemini-2.5-flash"),
