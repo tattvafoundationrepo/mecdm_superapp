@@ -9,12 +9,111 @@ from google.adk.tools.agent_tool import AgentTool
 from google.genai import Client
 from google.genai.types import HttpOptions
 
+from .app_utils.sql_validator import validate_sql
 from .services.file_processor import UPLOAD_BUCKET_NAME, read_extracted_text
 from .sub_agents import alloydb_agent
 from .sub_agents.alloydb.tools import get_toolbox_client
 from .utils.utils import USER_AGENT
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Fast-path: single-LLM-call data lookup (skips multi-agent pipeline)
+# ---------------------------------------------------------------------------
+
+_QUICK_SQL_PROMPT = """
+You are a PostgreSQL SQL generator. Translate the question into a single SELECT query.
+
+Rules:
+- Reference tables as "table_name" (double-quoted, case-sensitive).
+- Use ONLY columns listed in the schema below.
+- Minimize joins. Ensure matching data types on join columns.
+- Include all non-aggregated SELECT columns in GROUP BY.
+- Apply WHERE/HAVING filters to minimize returned rows.
+- In mother_journeys and anc_visits, ALL columns are TEXT type — cast to numeric/date as needed.
+- District names in mother_journeys/anc_visits are UPPERCASE (e.g., 'EAST KHASI HILLS').
+- Use integer code joins (district_code_lgd, block_code_lgd) instead of name joins when possible.
+- Output ONLY the SQL query, no markdown fences, no explanation.
+
+Schema:
+```
+{SCHEMA}
+```
+
+Question: {QUESTION}
+""".strip()
+
+
+async def quick_data_lookup(
+    question: str,
+    tool_context: ToolContext,
+) -> dict:
+    """Fast single-step data retrieval — generates SQL and executes it in one call.
+
+    Use this for simple, direct data questions that target one or two tables
+    and need no complex analysis (e.g., counts, sums, listings, filters).
+    For complex multi-table joins, analytics, or ambiguous questions, use
+    call_alloydb_agent instead.
+
+    Args:
+        question: Natural language question about the data.
+        tool_context: ADK tool context (carries database_settings in state).
+
+    Returns:
+        dict with 'query_result' and 'error_message' keys.
+    """
+    result = {"query_result": "", "error_message": "", "sql": ""}
+
+    # 1. Get schema summary from state (already loaded at agent startup)
+    db_settings = tool_context.state.get("database_settings", {})
+    schema_summary = (
+        db_settings.get("alloydb", {}).get("schema_summary", "")
+    )
+    if not schema_summary:
+        result["error_message"] = (
+            "Schema summary not available. Use call_alloydb_agent instead."
+        )
+        return result
+
+    # 2. Single LLM call: question → SQL
+    prompt = _QUICK_SQL_PROMPT.format(SCHEMA=schema_summary, QUESTION=question)
+
+    llm_client = _get_v2_llm_client()
+    response = llm_client.models.generate_content(
+        model=os.getenv("BASELINE_NL2SQL_MODEL", ""),
+        contents=prompt,
+        config={"temperature": 0.1},
+    )
+
+    sql = (response.text or "").replace("```sql", "").replace("```", "").strip()
+    if not sql:
+        result["error_message"] = "LLM returned empty SQL. Try call_alloydb_agent."
+        return result
+
+    result["sql"] = sql
+    logger.info("quick_data_lookup SQL: %s", sql)
+
+    # 3. Validate SQL (reuse existing pglast validator)
+    is_safe, reason = validate_sql(sql)
+    if not is_safe:
+        result["error_message"] = f"Blocked: {reason}. Try call_alloydb_agent."
+        return result
+
+    # 4. Execute via MCP Toolbox
+    try:
+        execute_sql_tool = get_toolbox_client().load_tool("execute_sql")
+        rows = execute_sql_tool(sql)
+        if rows:
+            result["query_result"] = rows
+            tool_context.state["alloydb_query_result"] = rows
+            tool_context.state["sql_query"] = sql
+        else:
+            result["error_message"] = "Query executed successfully (no results)."
+    except Exception as e:
+        result["error_message"] = f"Query error: {e}. Try call_alloydb_agent."
+
+    return result
 
 
 async def call_alloydb_agent(

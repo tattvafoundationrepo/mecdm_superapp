@@ -54,6 +54,7 @@ from .tools import (
     get_predefined_stats_catalog,
     get_stats_schema_summary,
     get_weather_data,
+    quick_data_lookup,
     read_uploaded_file,
     search_policy_rag_engine,
 )
@@ -233,6 +234,7 @@ def create_root_agent() -> LlmAgent:
     # Add dataset-specific tools
     for dataset in _config._raw_dataset_config.get("datasets", []):
         if dataset["type"] == "alloydb":
+            tools.append(quick_data_lookup)
             tools.append(call_alloydb_agent)
 
     agent = LlmAgent(

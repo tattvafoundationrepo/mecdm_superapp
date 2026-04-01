@@ -272,15 +272,35 @@ def get_tool_usage_block(include_mcp: bool = True) -> str:
 
 ## Primary Data Tools
 
-### `call_alloydb_agent`
-Use for: Data retrieval, SQL generation, record lookups
+### `quick_data_lookup` (FAST PATH — prefer this for simple queries)
+Use for: Simple, direct data questions targeting 1-2 tables
+Input: Natural language question about data
+Returns: Query results directly (single LLM call + execute — no sub-agent overhead)
+
+**Use when the question is:**
+- A straightforward count, sum, average, or listing
+- Filtering or looking up records from one or two obvious tables
+- Simple aggregations with GROUP BY
+
+Examples:
+- "How many deliveries in West Garo Hills?"
+- "List all districts"
+- "Total ANC visits in January 2025"
+- "Average IDR by district"
+- "Count of health facilities in East Khasi Hills"
+
+If quick_data_lookup returns an error, fall back to call_alloydb_agent.
+
+### `call_alloydb_agent` (FULL PIPELINE — for complex queries)
+Use for: Complex data retrieval requiring multi-table joins, ambiguous questions, or when quick_data_lookup fails
 Input: Natural language question about data
 Returns: Structured data or SQL results
 
-When to use:
-- "How many deliveries in West Garo Hills?"
-- "List blocks with low IDR"
-- "Get ANC visit counts by month"
+**Use when the question involves:**
+- Joining 3+ tables or ambiguous table selection
+- Complex subqueries, CTEs, or window functions
+- Questions where you're unsure which tables to use
+- Fallback after quick_data_lookup error
 
 ### `call_analytics_agent`
 Use for: Complex analysis, predictions, statistical computations
@@ -329,15 +349,25 @@ Preferred for:
 
 ```
 1. PLAN       -> Identify tables and relationships needed
-2. RETRIEVE   -> call_alloydb_agent to get raw data
+2. RETRIEVE   -> SIMPLE query? quick_data_lookup : call_alloydb_agent
 3. ANALYZE    -> call_analytics_agent if trends/stats computation needed
 4. VISUALIZE  -> generate_stat_query to build frontend-ready chart/table JSON
 5. RECOMMEND  -> search_policy_rag_engine to ground recommendations in policy
 6. RESPOND    -> Markdown with findings + visualization blocks + recommendation table
 ```
 
+### Step 2: Smart Data Routing (CRITICAL for performance)
+**Default to `quick_data_lookup`** for simple questions (counts, sums, listings, filters
+on 1-2 tables). This is ~3x faster because it uses a single LLM call instead of the
+full multi-agent pipeline.
+
+**Fall back to `call_alloydb_agent`** only when:
+- The question requires 3+ table joins or complex logic
+- You're unsure which tables are needed
+- `quick_data_lookup` returned an error
+
 ### Steps 2-3: Data Retrieval & Analysis (FIRST)
-Start with `call_alloydb_agent` to fetch the data. If the query needs trend analysis,
+After retrieving data (via either path), if the query needs trend analysis,
 correlations, or complex computation, pass the results to `call_analytics_agent`.
 These steps give you the ACTUAL numbers you'll reference in your response.
 
@@ -366,7 +396,7 @@ Users may attach files (PDF, DOCX, PPTX, XLSX, images) to their messages for ana
 
 ## Anti-Patterns (Avoid)
 
-- Never generate raw SQL directly - always use call_alloydb_agent
+- Never generate raw SQL directly - always use quick_data_lookup or call_alloydb_agent
 - Never use matplotlib - use mecdm_viz JSON blocks only
 - Never fetch entire tables - always include WHERE filters
 - Never join tables without checking CROSS_DATASET_RELATIONS
