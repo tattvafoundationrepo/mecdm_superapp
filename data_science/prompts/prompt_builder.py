@@ -462,6 +462,18 @@ FALLBACK: For queries too complex for V2 (CTEs, UNION, correlated subqueries):
 - `chart.mapping`: {xAxis, yAxis (string or string[]), value (for kpi_card), label (for pie), groupBy}
 - `chart.options`: {title, subtitle, showGrid, showLegend, colors[], orientation, numberFormat, icon}
 
+### Chart Type Selection Rules:
+- **grouped_bar**: Comparing ONE metric across MULTIPLE categories over time (e.g., districts by month). Use xAxis=time, yAxis=metric, groupBy=category. This is the DEFAULT for "compare districts/blocks over time".
+- **stacked_bar**: Showing composition/parts-of-whole over time (e.g., delivery types as % of total per month).
+- **bar**: Single-dimension ranking or comparison (e.g., districts ranked by a metric, no time axis).
+- **line**: Single entity's trend over time, or a small number of series (≤3) where the continuous trend matters more than point-to-point comparison.
+- **area**: Like line but emphasizing volume/magnitude over time.
+- **pie/donut**: Proportions of a whole (≤7 slices).
+- **table**: Detailed multi-column data, or when exact numbers matter more than visual patterns.
+- **kpi_card**: Single headline number (total, average, rate).
+
+KEY RULE: When the user asks to compare multiple entities (districts, blocks, facilities) over time, use **grouped_bar** with groupBy, NOT line. Line charts with many overlapping series are hard to read and compare.
+
 ### District names:
 - District names in mother_journeys/anc_visits are UPPERCASE (e.g., 'EAST KHASI HILLS')
 - Use integer code joins (district_code_lgd, block_code_lgd) over name joins
