@@ -193,21 +193,3 @@ class QueryAuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, server_default=func.now()
     )
-
-
-# ── Golden SQL examples ──────────────────────────────────────────────────────
-
-
-class GoldenSql(Base):
-    __tablename__ = "golden_sql"
-
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    question: Mapped[str] = mapped_column(Text, nullable=False)
-    sql_query: Mapped[str] = mapped_column(Text, nullable=False)
-    explanation: Mapped[str | None] = mapped_column(Text)
-    tables_used: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_by: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, server_default=func.now()
-    )

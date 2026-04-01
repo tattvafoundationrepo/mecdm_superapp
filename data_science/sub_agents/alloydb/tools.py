@@ -127,42 +127,6 @@ def update_database_settings():
     return database_settings
 
 
-def _fetch_golden_examples() -> str:
-    """Fetch golden SQL examples directly from the shared user DB."""
-    try:
-        from sqlalchemy import create_engine, select
-
-        from data_science.app_utils.models import GoldenSql
-
-        db_url = os.environ.get("DATABASE_URL_USER")
-        if not db_url:
-            logger.warning("DATABASE_URL_USER not set, skipping golden SQL examples")
-            return ""
-
-        engine = create_engine(db_url, pool_pre_ping=True)
-        with engine.connect() as conn:
-            result = conn.execute(
-                select(GoldenSql).where(GoldenSql.is_active == True).limit(15)  # noqa: E712
-            )
-            rows = result.all()
-
-        if not rows:
-            return ""
-
-        lines = []
-        for row in rows:
-            lines.append(f"Q: {row.question}")
-            lines.append(f"SQL: {row.sql_query}")
-            if row.explanation:
-                lines.append(f"-- {row.explanation}")
-            lines.append("")
-        return "\n".join(lines)
-
-    except Exception as e:
-        logger.warning("Failed to fetch golden SQL examples: %s", e)
-        return ""
-
-
 def alloydb_nl2sql(
     question: str,
     tool_context: ToolContext,
@@ -190,7 +154,7 @@ Rules:
 - In mother_journeys and anc_visits, ALL columns are TEXT type — cast to numeric/date as needed.
 - District names in mother_journeys/anc_visits are UPPERCASE (e.g., 'EAST KHASI HILLS').
 - Use integer code joins (district_code_lgd, block_code_lgd) instead of name joins when possible.
-{EXAMPLES_SECTION}
+
 Schema:
 ```
 {SCHEMA}
@@ -234,21 +198,9 @@ If no tables are relevant, return "none".
     # --- Stage 2: Detailed Schema Fetch ---
     schema = get_table_schema(selected_tables)
 
-    # Fetch golden SQL examples for few-shot learning
-    golden_examples = _fetch_golden_examples()
-    examples_section = ""
-    if golden_examples:
-        examples_section = f"""
-Example Queries (verified correct — follow these patterns):
-```
-{golden_examples}
-```
-"""
-
     prompt = prompt_template.format(
         SCHEMA=schema,
         QUESTION=question,
-        EXAMPLES_SECTION=examples_section,
     )
 
     response = llm_client.models.generate_content(
