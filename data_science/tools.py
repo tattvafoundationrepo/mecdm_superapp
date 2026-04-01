@@ -12,7 +12,7 @@ from google.genai.types import HttpOptions
 from .app_utils.sql_validator import validate_sql
 from .services.file_processor import UPLOAD_BUCKET_NAME, read_extracted_text
 from .sub_agents import alloydb_agent
-from .sub_agents.alloydb.tools import get_toolbox_client
+from .sub_agents.alloydb.tools import get_table_schema, get_toolbox_client
 from .utils.utils import USER_AGENT
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ You are a PostgreSQL SQL generator. Translate the question into a single SELECT 
 
 Rules:
 - Reference tables as "table_name" (double-quoted, case-sensitive).
-- Use ONLY columns listed in the schema below.
+- Use ONLY columns listed in the schema below. Do NOT invent column names.
 - Minimize joins. Ensure matching data types on join columns.
 - Include all non-aggregated SELECT columns in GROUP BY.
 - Apply WHERE/HAVING filters to minimize returned rows.
@@ -47,6 +47,7 @@ Question: {QUESTION}
 
 async def quick_data_lookup(
     question: str,
+    table_names: str,
     tool_context: ToolContext,
 ) -> dict:
     """Fast single-step data retrieval — generates SQL and executes it in one call.
@@ -58,26 +59,40 @@ async def quick_data_lookup(
 
     Args:
         question: Natural language question about the data.
+        table_names: Comma-separated table names to query (e.g. "mother_journeys"
+            or "mother_journeys,districts"). You MUST specify the relevant tables
+            based on the schema summary you already have.
         tool_context: ADK tool context (carries database_settings in state).
 
     Returns:
-        dict with 'query_result' and 'error_message' keys.
+        dict with 'query_result', 'error_message', and 'sql' keys.
     """
     result = {"query_result": "", "error_message": "", "sql": ""}
 
-    # 1. Get schema summary from state (already loaded at agent startup)
-    db_settings = tool_context.state.get("database_settings", {})
-    schema_summary = (
-        db_settings.get("alloydb", {}).get("schema_summary", "")
-    )
-    if not schema_summary:
+    if not table_names or not table_names.strip():
         result["error_message"] = (
-            "Schema summary not available. Use call_alloydb_agent instead."
+            "table_names is required. Specify which tables to query."
         )
         return result
 
-    # 2. Single LLM call: question → SQL
-    prompt = _QUICK_SQL_PROMPT.format(SCHEMA=schema_summary, QUESTION=question)
+    # 1. Fetch detailed column schema for the specified tables (cached, fast)
+    try:
+        detailed_schema = get_table_schema(table_names)
+    except Exception as e:
+        result["error_message"] = (
+            f"Could not fetch schema for '{table_names}': {e}. "
+            "Try call_alloydb_agent."
+        )
+        return result
+
+    if not detailed_schema:
+        result["error_message"] = (
+            f"No schema found for '{table_names}'. Check table names."
+        )
+        return result
+
+    # 2. Single LLM call: question + detailed column schema → SQL
+    prompt = _QUICK_SQL_PROMPT.format(SCHEMA=detailed_schema, QUESTION=question)
 
     llm_client = _get_v2_llm_client()
     response = llm_client.models.generate_content(
@@ -104,7 +119,11 @@ async def quick_data_lookup(
     try:
         execute_sql_tool = get_toolbox_client().load_tool("execute_sql")
         rows = execute_sql_tool(sql)
-        if rows:
+
+        # MCP Toolbox returns error strings instead of raising exceptions
+        if isinstance(rows, str) and rows.lower().startswith("error"):
+            result["error_message"] = f"{rows}. Try call_alloydb_agent."
+        elif rows:
             result["query_result"] = rows
             tool_context.state["alloydb_query_result"] = rows
             tool_context.state["sql_query"] = sql
@@ -925,20 +944,18 @@ async def generate_stat_query(
     question: str,
     tool_context: ToolContext,
 ) -> str:
-    """Generate a StatQuery V2 JSON for a structured data question AND execute it.
+    """Generate a StatQuery V2 JSON for frontend visualization AFTER data has been retrieved.
 
-    Use this tool for: district summaries, monthly trends, KPI metrics, rankings,
-    rate calculations (IDR/MMR/IMR), facility counts, comparisons with thresholds,
-    period-over-period analysis.
+    IMPORTANT: Do NOT call this as your first tool. Always retrieve data first using
+    quick_data_lookup or call_alloydb_agent, then call this tool to create the
+    frontend visualization JSON.
 
-    The generated query is structured JSON that the frontend can execute, render
-    as an interactive chart, and save to the dashboard. Prefer this over
-    call_alloydb_agent for any query that fits the StatQuery V2 format.
+    Use this tool for: building interactive charts, KPI cards, and dashboard widgets
+    from data you have already retrieved.
 
-    Returns both the validated StatQuery V2 JSON and the actual query results
-    so you can provide data-driven insights. Use the STAT_QUERY_JSON in your
-    mecdm_stat block (as the "query" field) and the QUERY_RESULTS for your
-    textual analysis.
+    Returns both the validated StatQuery V2 JSON and the actual query results.
+    Use the STAT_QUERY_JSON in your mecdm_stat block (as the "query" field)
+    and the QUERY_RESULTS for your textual analysis.
 
     Args:
         question: The natural language question about health data.

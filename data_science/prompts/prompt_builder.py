@@ -274,8 +274,10 @@ def get_tool_usage_block(include_mcp: bool = True) -> str:
 
 ### `quick_data_lookup` (FAST PATH — prefer this for simple queries)
 Use for: Simple, direct data questions targeting 1-2 tables
-Input: Natural language question about data
+Input: `question` (natural language) + `table_names` (comma-separated table names you identify from the schema summary)
 Returns: Query results directly (single LLM call + execute — no sub-agent overhead)
+
+**You MUST supply `table_names`** — look at the schema summary you already have and pick the relevant table(s).
 
 **Use when the question is:**
 - A straightforward count, sum, average, or listing
@@ -283,11 +285,11 @@ Returns: Query results directly (single LLM call + execute — no sub-agent over
 - Simple aggregations with GROUP BY
 
 Examples:
-- "How many deliveries in West Garo Hills?"
-- "List all districts"
-- "Total ANC visits in January 2025"
-- "Average IDR by district"
-- "Count of health facilities in East Khasi Hills"
+- "How many deliveries in West Garo Hills?" → `table_names="mother_journeys"`
+- "List all districts" → `table_names="districts"`
+- "Total ANC visits in January 2025" → `table_names="anc_visits"`
+- "Average IDR by district" → `table_names="mother_journeys"`
+- "Count of health facilities in East Khasi Hills" → `table_names="health_facilities"`
 
 If quick_data_lookup returns an error, fall back to call_alloydb_agent.
 
@@ -313,12 +315,16 @@ When to use:
 - Ranking with computed metrics
 - Aggregations requiring Python (pandas, numpy)
 
-### `generate_stat_query`
-Use for: Building StatQuery V2 JSON AND retrieving actual data in one call
+### `generate_stat_query` (VISUALIZATION ONLY — call AFTER data retrieval)
+Use for: Building StatQuery V2 JSON for frontend charts/tables
 Input: Natural language question
 Returns: Two sections:
   - `<STAT_QUERY_JSON>`: The validated StatQuery V2 JSON for frontend visualization
   - `<QUERY_RESULTS>`: Actual data rows from executing the query
+
+**DO NOT use this as your first/primary data retrieval tool.**
+Always retrieve data FIRST with `quick_data_lookup` or `call_alloydb_agent`,
+then call `generate_stat_query` to create the visualization JSON.
 
 IMPORTANT workflow:
 - Use the QUERY_RESULTS data for your textual insights and analysis — never guess or assume data
@@ -345,16 +351,20 @@ Preferred for:
 | `export_data_to_csv` | Data export for users |
 | `google_search` | External fact verification |
 
-## Workflow Pattern (Follow This Order)
+## Workflow Pattern (Follow This Order STRICTLY)
 
 ```
 1. PLAN       -> Identify tables and relationships needed
-2. RETRIEVE   -> SIMPLE query? quick_data_lookup : call_alloydb_agent
+2. RETRIEVE   -> SIMPLE query? quick_data_lookup(table_names=...) : call_alloydb_agent
 3. ANALYZE    -> call_analytics_agent if trends/stats computation needed
 4. VISUALIZE  -> generate_stat_query to build frontend-ready chart/table JSON
 5. RECOMMEND  -> search_policy_rag_engine to ground recommendations in policy
 6. RESPOND    -> Markdown with findings + visualization blocks + recommendation table
 ```
+
+**CRITICAL: Always start at Step 2 (RETRIEVE data first).** Never skip to Step 4
+(generate_stat_query) without retrieving data first. generate_stat_query is for
+visualization JSON — it is NOT a data retrieval shortcut.
 
 ### Step 2: Smart Data Routing (CRITICAL for performance)
 **Default to `quick_data_lookup`** for simple questions (counts, sums, listings, filters
