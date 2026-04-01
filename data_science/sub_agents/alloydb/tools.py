@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 
 from google.adk.tools import ToolContext
 from google.genai import Client
@@ -104,11 +105,25 @@ def get_schema_summary():
     return schema_summary
 
 
+# In-memory cache for table schemas: {table_names_key: (timestamp, schema)}
+_table_schema_cache: dict[str, tuple[float, str]] = {}
+_TABLE_SCHEMA_TTL = 300  # 5 minutes
+
+
 def get_table_schema(table_names: str):
+    cache_key = ",".join(sorted(t.strip() for t in table_names.split(",")))
+    now = time.monotonic()
+
+    cached = _table_schema_cache.get(cache_key)
+    if cached and (now - cached[0]) < _TABLE_SCHEMA_TTL:
+        logger.debug("Table schema cache hit for: %s", cache_key)
+        return cached[1]
+
     get_schema_tool = get_toolbox_client().load_tool("list_tables")
     schema = get_schema_tool(
         schema_names=get_env_var("ALLOYDB_SCHEMA_NAME"), table_names=table_names
     )
+    _table_schema_cache[cache_key] = (now, schema)
     return schema
 
 
