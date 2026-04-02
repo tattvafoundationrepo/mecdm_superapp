@@ -9,11 +9,18 @@ This module provides a composable prompt architecture that:
 """
 
 import json
+import logging
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Callable, Union
 from dataclasses import dataclass, field
 from enum import Enum
+
+from google.adk.agents.readonly_context import ReadonlyContext
+
+from .task_blocks import TASK_BLOCKS
+
+logger = logging.getLogger(__name__)
 
 
 class Persona(Enum):
@@ -639,24 +646,13 @@ def build_relations_block(relations: RelationsConfig) -> str:
 # Main Prompt Builder
 # ============================================================================
 
-def build_root_instruction(
+def _build_base_instruction(
     config: PromptConfig,
     dataset: DatasetConfig,
     relations: RelationsConfig,
     db_schema: str,
 ) -> str:
-    """
-    Build the complete root agent instruction from modular blocks.
-
-    Args:
-        config: Prompt configuration options
-        dataset: Loaded dataset configuration
-        relations: Loaded cross-dataset relations
-        db_schema: Database schema string from introspection
-
-    Returns:
-        Complete instruction prompt string
-    """
+    """Build the static base instruction from modular blocks (no task-specific guidance)."""
     blocks = [
         IDENTITY_BLOCK,
         get_persona_block(config.persona),
@@ -684,6 +680,52 @@ def build_root_instruction(
         blocks.append(PRIVACY_ENFORCEMENT_BLOCK)
 
     return "\n\n".join(blocks)
+
+
+def build_root_instruction(
+    config: PromptConfig,
+    dataset: DatasetConfig,
+    relations: RelationsConfig,
+    db_schema: str,
+) -> str:
+    """
+    Build the complete root agent instruction from modular blocks.
+
+    Backward-compatible wrapper around _build_base_instruction.
+    """
+    return _build_base_instruction(config, dataset, relations, db_schema)
+
+
+def build_instruction_provider(
+    config: PromptConfig,
+    dataset: DatasetConfig,
+    relations: RelationsConfig,
+    db_schema: str,
+) -> Callable[[ReadonlyContext], str]:
+    """Return an InstructionProvider callable for dynamic per-turn instructions.
+
+    The callable reads ``temp:detected_intents`` from session state
+    (set by the before_agent_callback) and appends matching task-specific
+    prompt blocks to the pre-built base instruction.
+    """
+    base_instruction = _build_base_instruction(config, dataset, relations, db_schema)
+    logger.info(
+        "Built base instruction for InstructionProvider: %d chars", len(base_instruction)
+    )
+
+    def instruction_provider(ctx: ReadonlyContext) -> str:
+        detected: list[str] = list(ctx.state.get("temp:detected_intents", []))
+        if not detected:
+            return base_instruction
+
+        task_blocks_text = "\n\n".join(
+            TASK_BLOCKS[t] for t in detected if t in TASK_BLOCKS
+        )
+        if task_blocks_text:
+            return f"{base_instruction}\n\n{task_blocks_text}"
+        return base_instruction
+
+    return instruction_provider
 
 
 def build_global_instruction() -> str:

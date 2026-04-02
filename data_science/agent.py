@@ -37,9 +37,10 @@ from .prompts.prompt_builder import (
     RelationsConfig,
     load_dataset_config,
     load_relations_config,
-    build_root_instruction,
+    build_instruction_provider,
     build_global_instruction,
 )
+from .prompts.intent_classifier import IntentClassifier
 from .sub_agents.alloydb.tools import (
     get_database_settings as get_alloydb_database_settings,
     get_toolbox_toolset,
@@ -149,16 +150,43 @@ class AgentConfiguration:
 
 # Global configuration instance
 _config = AgentConfiguration()
+_classifier = IntentClassifier()
 
 
 # ============================================================================
 # Callback Handlers
 # ============================================================================
 
+def _extract_user_text(callback_context: CallbackContext) -> str | None:
+    """Extract text from the current user message."""
+    user_content = callback_context._invocation_context.user_content
+    if user_content and user_content.parts:
+        for part in user_content.parts:
+            if part.text:
+                return part.text
+    return None
+
+
 def load_database_settings_in_context(callback_context: CallbackContext):
-    """Load database settings into the callback context on first use."""
+    """Load database settings and classify user intent on each turn."""
     if "database_settings" not in callback_context.state:
         callback_context.state["database_settings"] = _config.database_settings
+
+    # Classify user intent for dynamic prompting
+    user_text = _extract_user_text(callback_context)
+    if user_text:
+        result = _classifier.classify(user_text)
+        # temp: prefix → per-invocation only (read by InstructionProvider)
+        callback_context.state["temp:detected_intents"] = result.detected
+        callback_context.state["temp:primary_intent"] = result.primary
+        callback_context.state["temp:intent_confidence"] = result.confidence
+        # Non-prefixed → persisted in session, sent to frontend via stateDelta
+        callback_context.state["detected_intent"] = result.primary
+        callback_context.state["detected_intents"] = result.detected
+        logger.info(
+            "Intent classified: primary=%s, detected=%s, confidence=%.2f",
+            result.primary, result.detected, result.confidence,
+        )
 
 
 async def save_session_to_memory(callback_context: CallbackContext):
@@ -200,8 +228,8 @@ def create_root_agent() -> LlmAgent:
     # Build prompt configuration
     prompt_config = _config.build_prompt_config()
 
-    # Build the instruction prompt
-    instruction = build_root_instruction(
+    # Build dynamic instruction provider (callable, resolved per-turn)
+    instruction_provider = build_instruction_provider(
         config=prompt_config,
         dataset=_config.dataset_config,
         relations=_config.relations_config,
@@ -209,8 +237,7 @@ def create_root_agent() -> LlmAgent:
     )
 
     logger.info(
-        "Built instruction prompt: %d chars, persona=%s",
-        len(instruction),
+        "Built dynamic instruction provider, persona=%s",
         prompt_config.persona.value,
     )
 
@@ -241,7 +268,7 @@ def create_root_agent() -> LlmAgent:
     agent = LlmAgent(
         model=os.getenv("ROOT_AGENT_MODEL", "gemini-2.5-flash"),
         name="data_science_root_agent",
-        instruction=instruction,
+        instruction=instruction_provider,
         global_instruction=build_global_instruction(),
         sub_agents=[],
         tools=tools,
