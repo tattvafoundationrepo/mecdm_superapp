@@ -183,8 +183,6 @@ Workflow:
    - 4+ ANC visits: ≥75%
    - Full immunization: ≥90%
 
-Do NOT call search_policy_rag_engine for simple factual questions. Only invoke it when
-the user asks for recommendations, action plans, or when data reveals red-flag thresholds.
 </TASK_GUIDANCE>
 """.strip(),
 
