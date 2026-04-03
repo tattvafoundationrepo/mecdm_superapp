@@ -12,7 +12,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Callable, Union
+from typing import Optional, Dict, Any, List, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -40,7 +40,6 @@ class PromptConfig:
     include_domain_knowledge: bool = True
     include_visualization_guide: bool = True
     strict_privacy: bool = True
-    max_schema_depth: int = 2
 
 
 @dataclass
@@ -272,9 +271,21 @@ High_Risk_Rate = high_risk_registrations * 100.0 / total_registrations
 """.strip()
 
 
-def get_tool_usage_block(include_mcp: bool = True) -> str:  # noqa: ARG001
-    """Return tool usage instructions."""
-    base = """
+SQL_RULES_BLOCK = """
+<SQL_RULES>
+These rules apply whenever you write SQL directly via `execute_sql`:
+- Double-quote table names: `"mother_journeys"`, `"anc_visits"`
+- In mother_journeys and anc_visits, ALL columns are TEXT — cast with `::NUMERIC` or `::DATE`
+- District names in mother_journeys/anc_visits are UPPERCASE (e.g., 'EAST KHASI HILLS')
+- COMMON MISTAKES: mother_journeys uses "district" (not "district_name"), "baby_weight_kg" (not "child_weight_kgs"). subdistricts uses "blockname" (not "block_name").
+- Use integer code joins (district_code_lgd, block_code_lgd) over name joins when possible
+- Always include WHERE filters or LIMIT — never fetch entire tables
+- Never expose mother_id, names, or phone numbers
+</SQL_RULES>
+""".strip()
+
+
+TOOL_USAGE_BLOCK = """
 <TOOL_USAGE>
 
 ## Tool Routing
@@ -293,15 +304,6 @@ If `execute_sql` returns an error, fix your SQL using the error message and retr
 
 **Complex queries (3+ tables, ambiguous, or repeated failures) — delegate:**
 Call `call_alloydb_agent(question)` — it handles table selection, SQL generation, and error recovery automatically.
-
-**SQL rules when writing queries directly:**
-- Double-quote table names: `"mother_journeys"`, `"anc_visits"`
-- In mother_journeys and anc_visits, ALL columns are TEXT — cast with `::NUMERIC` or `::DATE`
-- District names in mother_journeys/anc_visits are UPPERCASE (e.g., 'EAST KHASI HILLS')
-- COMMON MISTAKES: mother_journeys uses "district" (not "district_name"), "baby_weight_kg" (not "child_weight_kgs"). subdistricts uses "blockname" (not "block_name").
-- Use integer code joins (district_code_lgd, block_code_lgd) over name joins when possible
-- Always include WHERE filters or LIMIT — never fetch entire tables
-- Never expose mother_id, names, or phone numbers
 
 ### Step 2: Analyze (optional — only if Python computation needed)
 | Need | Tool |
@@ -347,174 +349,30 @@ Do NOT call search_policy_rag_engine for simple factual questions like "list dis
 </TOOL_USAGE>
 """.strip()
 
-    return base
-
 
 VISUALIZATION_SCHEMA_BLOCK = """
 <VISUALIZATION_SCHEMAS>
 
-Always use fenced code blocks with the appropriate language tag.
+You have three visualization output formats. Always use fenced code blocks with the appropriate tag.
 
-## mecdm_stat (Structured Queries - PREFERRED)
-
+## mecdm_stat (Structured Queries — PREFERRED)
 Use for: KPIs, trends, comparisons, rankings from stats-eligible tables.
-Frontend executes the query and renders interactive charts.
-
-PREFERRED: Use `generate_stat_query` tool to build StatQuery V2 JSON from a natural language question.
-It handles schema lookup, expression validation, executes the query, and returns both the JSON and actual data.
-
-CRITICAL — Using `generate_stat_query` results:
-- The tool returns `<STAT_QUERY_JSON>` and `<QUERY_RESULTS>` sections
-- Base your textual insights on the actual QUERY_RESULTS data, NOT assumptions or guesses
+PREFERRED: Call `generate_stat_query(question)` — it builds StatQuery V2 JSON, validates it, executes it, and returns both the JSON and actual data.
 - Embed the returned STAT_QUERY_JSON directly as the "query" field in your mecdm_stat block
-- Do NOT rewrite, modify, or re-create the query JSON — only add "chart", "name", and "description" around it
-- If you need multiple visualizations (table + chart), reuse the SAME query JSON for each mecdm_stat block
-
-FALLBACK: For queries too complex for V2 (CTEs, UNION, correlated subqueries):
-  1. Use `call_alloydb_agent` to get SQL and results
-  2. Embed the results directly in an mecdm_viz block
-
-```mecdm_stat
-{
-  "query": {
-    "version": 2,
-    "source": {"table": "village_indicators_monthly"},
-    "dimensions": [{"column": "district_name", "alias": "district"}],
-    "measures": [
-      {"column": "institutional_deliveries", "aggregate": "sum", "alias": "inst_del"},
-      {"column": "total_deliveries", "aggregate": "sum", "alias": "total_del"}
-    ],
-    "computedColumns": [
-      {"alias": "idr", "expression": "inst_del * 100.0 / NULLIF(total_del, 0)"}
-    ],
-    "orderBy": [{"column": "idr", "direction": "desc"}]
-  },
-  "chart": {
-    "type": "bar",
-    "mapping": {"xAxis": "district", "yAxis": "idr"},
-    "options": {"title": "Institutional Delivery Rate by District", "numberFormat": "0.1%"}
-  },
-  "name": "IDR by District",
-  "description": "Institutional delivery rate ranked by district"
-}
-```
-
-### StatQuery V2 Fields:
-- `version`: 2 (always integer, not string)
-- `source.table`: Any non-blocked table (use `get_stats_schema_summary` to discover available tables)
-- `source.joins`: Optional [{table, on: {left, right}, type: "inner"|"left"|"right"}]
-- `dimensions`: GROUP BY columns with optional `alias` and transforms (`date_trunc_month`, etc.)
-  - For year_month TEXT columns, do NOT use date_trunc transforms — use custom timeRange with "YYYY-MM" strings
-- `measures`: Aggregations (`sum`, `avg`, `count`, `min`, `max`, `count_distinct`)
-- `computedColumns`: Derived expressions using measure/dimension aliases
-  - Only safe operations: arithmetic (+,-,*,/), COALESCE, NULLIF, ROUND, CEIL, FLOOR, ABS, CAST, CASE WHEN
-  - In mother_journeys/anc_visits, ALL columns are TEXT — cast with CAST(col AS numeric) if needed
-- `windows`: Window functions (`rank`, `lag`, `lead`, `row_number`, `sum`, `avg`, `count`)
-- `filters`: Pre-aggregation WHERE conditions
-  - Operators: eq, neq, gt, gte, lt, lte, in, not_in, like, is_null, is_not_null, between
-- `having`: Post-aggregation HAVING conditions (same operators, applied to measure aliases)
-- `timeRange`: {column, preset} or {column, custom: {from, to}}
-  - Presets: last_7d, last_30d, last_quarter, last_year, ytd, all
-- `orderBy`: [{column: "alias", direction: "asc"|"desc"}]
-- `limit`: Max rows (default 1000, max 10000)
-- `chart.type`: bar, line, area, pie, donut, kpi_card, stacked_bar, grouped_bar, table
-- `chart.mapping`: {xAxis, yAxis (string or string[]), value (for kpi_card), label (for pie), groupBy}
-- `chart.options`: {title, subtitle, showGrid, showLegend, colors[], orientation, numberFormat, icon}
-
-### Chart Type Selection Rules:
-- **grouped_bar**: Comparing ONE metric across MULTIPLE categories over time (e.g., districts by month). Use xAxis=time, yAxis=metric, groupBy=category. This is the DEFAULT for "compare districts/blocks over time".
-- **stacked_bar**: Showing composition/parts-of-whole over time (e.g., delivery types as % of total per month).
-- **bar**: Single-dimension ranking or comparison (e.g., districts ranked by a metric, no time axis).
-- **line**: Single entity's trend over time, or a small number of series (≤3) where the continuous trend matters more than point-to-point comparison.
-- **area**: Like line but emphasizing volume/magnitude over time.
-- **pie/donut**: Proportions of a whole (≤7 slices).
-- **table**: Detailed multi-column data, or when exact numbers matter more than visual patterns.
-- **kpi_card**: Single headline number (total, average, rate).
-
-KEY RULE: When the user asks to compare multiple entities (districts, blocks, facilities) over time, use **grouped_bar** with groupBy, NOT line. Line charts with many overlapping series are hard to read and compare.
-
-### District names:
-- District names in mother_journeys/anc_visits are UPPERCASE (e.g., 'EAST KHASI HILLS')
-- Use integer code joins (district_code_lgd, block_code_lgd) over name joins
-
-### village_indicators_monthly columns (primary table for MCH stats):
-  Dimensions: district_name, block_name, village_name, year_month (TEXT "YYYY-MM")
-  Join keys: district_code_lgd, block_code_lgd (BIGINT)
-  Measures: total_registrations, reg_1st_trimester, total_deliveries, institutional_deliveries,
-    home_del_sba, home_del_not_sba, high_risk_registrations, high_risk_deliveries,
-    maternal_deaths, total_anc_visits, ifa_recipients, tt_doses, mothers_counselled,
-    infant_deaths, neonatal_deaths
-For other tables, call `get_stats_schema_summary` to discover columns.
-
-### Common patterns (expressions reference measure ALIASES, not raw column names):
-- IDR: measures define aliases inst_del, total_del → computedColumns: [{"alias":"idr","expression":"inst_del * 100.0 / NULLIF(total_del, 0)"}]
-- MMR: measures define aliases deaths, total_del → computedColumns: [{"alias":"mmr","expression":"deaths * 100000.0 / NULLIF(total_del, 0)"}]
-- Ranking: {"alias":"rank","function":"rank","orderBy":[{"column":"registrations","direction":"desc"}]}
-- Threshold (having references measure aliases): having: [{"column":"total_del","operator":"gt","value":100}]
-
+- Do NOT rewrite or re-create the query JSON — only add "chart", "name", "description" around it
+- Base textual insights on the actual QUERY_RESULTS, not assumptions
+FALLBACK for CTEs/UNION: use `call_alloydb_agent` + `mecdm_viz`.
 
 ## mecdm_map (Geographic Visualizations)
-
 Use for: Choropleths, bubble maps, facility overlays.
-The frontend fetches geometry and metric data, joins them, and renders the map automatically.
-You do NOT need to call call_alloydb_agent first — the frontend executes the query itself.
-
-```mecdm_map
-{
-  "query": {
-    "source": {"table": "village_indicators_monthly"},
-    "dimensions": [{"column": "district_name", "alias": "district_name"}],
-    "measures": [{"column": "total_deliveries", "aggregate": "sum", "alias": "deliveries"}]
-  },
-  "map": {
-    "mapType": "choropleth",
-    "geographyLevel": "district",
-    "metricColumn": "deliveries",
-    "joinKey": "district_name"
-  },
-  "overlays": {"facilities": true},
-  "title": "Total Deliveries by District"
-}
-```
-
-### Map Options:
-- `mapType`: `choropleth` (polygons) or `bubble` (points)
-- `geographyLevel`: `district` (12), `block` (46), or `village` (~2,600)
-- `joinKey`: Dimension alias for geometry join
-- `joinTarget`: "name" (default for district/block) or "code" (default for village)
-- `colorScheme`: optional minColor, maxColor for custom colors
-- `overlays.facilities`: Show PHC/CHC/SC markers
-- `overlays.awc`: Show Anganwadi markers
-- `geoFilter`: Optional district_name to scope block maps to a single district
-
-### SPATIAL QUERIES (using `find_nearest_facilities`):
-Use `find_nearest_facilities` when users ask about nearest/closest facilities or AWCs to a village.
-- Accepts: from_village, to_type (PHC/SC/CHC/DH/AWC/ANY_FACILITY/ANY), count, from_district, from_block
-- Returns an mecdm_map block with markers and distance lines. Include it verbatim in your response.
+The frontend executes the query and renders the map — you do NOT need to call call_alloydb_agent first.
+For nearest-facility queries, use `find_nearest_facilities` and include its mecdm_map block verbatim.
 
 ## mecdm_viz (Inline Visualizations)
-
 Use for: Pre-computed data, one-off charts, stat_cards with specific values.
-
-```mecdm_viz
-{
-  "type": "stat_cards",
-  "cards": [
-    {"label": "Total Registrations", "value": "12,450", "trend": "+5%", "color": "#22c55e"},
-    {"label": "Institutional Deliveries", "value": "8,920", "trend": "-2%", "color": "#ef4444"}
-  ]
-}
-```
-
-### Types:
-- `stat_cards`: 2-6 KPI cards with labels, values, trends
-- `chart`: Bar/line/pie with pre-computed data array
-  {"type":"chart","chartType":"bar|line|pie","title":"...","xKey":"field","series":[{"key":"field","label":"...","color":"#hex"}],"data":[...]}
-- `table`: Data table with column definitions
-  {"type":"table","title":"...","columns":[{"key":"field","label":"..."}],"data":[...]}
+Types: `stat_cards` (2-6 KPI cards), `chart` (bar/line/pie with data array), `table` (column defs + data).
 
 ## Selection Guide
-
 | Scenario | Use |
 |----------|-----|
 | Aggregation from stats tables | `mecdm_stat` |
@@ -558,6 +416,12 @@ CRITICAL: You must NEVER expose individual-level data.
 - Never return mother_id, pregnancy_id, name, or phone
 - Minimum aggregation level is village for health data
 - When in doubt, aggregate to block level
+
+NEVER do this:
+  SELECT mother_name, phone, district FROM "mother_journeys" WHERE district = 'EAST KHASI HILLS'
+
+ALWAYS aggregate:
+  SELECT district, COUNT(*) as registrations FROM "mother_journeys" GROUP BY district
 </PRIVACY_ENFORCEMENT>
 """.strip()
 
@@ -661,7 +525,8 @@ def _build_base_instruction(
     if config.include_domain_knowledge:
         blocks.append(DOMAIN_KNOWLEDGE_BLOCK)
 
-    blocks.append(get_tool_usage_block(include_mcp=True))
+    blocks.append(TOOL_USAGE_BLOCK)
+    blocks.append(SQL_RULES_BLOCK)
 
     if config.include_visualization_guide:
         blocks.append(VISUALIZATION_SCHEMA_BLOCK)
@@ -680,20 +545,6 @@ def _build_base_instruction(
         blocks.append(PRIVACY_ENFORCEMENT_BLOCK)
 
     return "\n\n".join(blocks)
-
-
-def build_root_instruction(
-    config: PromptConfig,
-    dataset: DatasetConfig,
-    relations: RelationsConfig,
-    db_schema: str,
-) -> str:
-    """
-    Build the complete root agent instruction from modular blocks.
-
-    Backward-compatible wrapper around _build_base_instruction.
-    """
-    return _build_base_instruction(config, dataset, relations, db_schema)
 
 
 def build_instruction_provider(
@@ -728,12 +579,16 @@ def build_instruction_provider(
     return instruction_provider
 
 
-def build_global_instruction() -> str:
-    """Build the global instruction that applies to all turns."""
+def build_global_instruction() -> Callable[[ReadonlyContext], str]:
+    """Return a dynamic global instruction that resolves the current date per turn."""
     from datetime import date
 
-    return f"""
-You are a Data Science and Analytics Multi-Agent System for Meghalaya ECD Mission.
-Today's date: {date.today()}
-Location context: Meghalaya, India
-""".strip()
+    def provider(ctx: ReadonlyContext) -> str:  # noqa: ARG001
+        return (
+            "You are a Data Science and Analytics Multi-Agent System "
+            "for Meghalaya ECD Mission.\n"
+            f"Today's date: {date.today()}\n"
+            "Location context: Meghalaya, India"
+        )
+
+    return provider
