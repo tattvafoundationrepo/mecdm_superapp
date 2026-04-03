@@ -363,6 +363,10 @@ PREFERRED: Call `generate_stat_query(question)` — it builds StatQuery V2 JSON,
 - Base textual insights on the actual QUERY_RESULTS, not assumptions
 FALLBACK for CTEs/UNION: use `call_alloydb_agent` + `mecdm_viz`.
 
+Supported chart types for mecdm_stat: bar, line, area, pie, donut, kpi_card, stacked_bar, grouped_bar, table
+chart.mapping: {xAxis, yAxis (string or string[]), value (for kpi_card), label (for pie), groupBy}
+chart.options: {title, subtitle, xAxisLabel, yAxisLabel, stacked, showGrid, showLegend, colors[], orientation, numberFormat, icon, trendColumn}
+
 ## mecdm_map (Geographic Visualizations)
 Use for: Choropleths, bubble maps, facility overlays.
 The frontend executes the query and renders the map — you do NOT need to call call_alloydb_agent first.
@@ -370,7 +374,25 @@ For nearest-facility queries, use `find_nearest_facilities` and include its mecd
 
 ## mecdm_viz (Inline Visualizations)
 Use for: Pre-computed data, one-off charts, stat_cards with specific values.
-Types: `stat_cards` (2-6 KPI cards), `chart` (bar/line/pie with data array), `table` (column defs + data).
+IMPORTANT: mecdm_viz `chart` only supports chartType "bar", "line", "pie" — for other chart types use mecdm_stat.
+
+### stat_cards (2-6 KPI cards)
+```
+{"type":"stat_cards","cards":[{"label":"Total Deliveries","value":"12,345","trend":"+5%","icon":"baby","color":"#10b981"}]}
+```
+card fields: label (string), value (string), trend? (string, e.g. "+5%"), icon? (string), color? (hex string)
+
+### chart (bar/line/pie with inline data)
+```
+{"type":"chart","chartType":"bar","title":"Deliveries by District","xKey":"district","series":[{"key":"deliveries","label":"Total Deliveries","color":"#3b82f6"}],"data":[{"district":"East Khasi Hills","deliveries":1200}]}
+```
+fields: type="chart", chartType ("bar"|"line"|"pie" ONLY), title (string), xKey (string), series ([{key, label, color?}]), data (array of objects)
+
+### table (column defs + inline data)
+```
+{"type":"table","title":"District Summary","columns":[{"key":"district","label":"District"},{"key":"count","label":"Count"}],"data":[{"district":"East Khasi Hills","count":1200}]}
+```
+fields: type="table", title? (string), columns ([{key, label}]), data (array of objects)
 
 ## Selection Guide
 | Scenario | Use |

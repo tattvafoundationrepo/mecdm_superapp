@@ -58,6 +58,9 @@ This question requests a visual output. Use `generate_stat_query` to build StatQ
 
 KEY RULE: When the user asks to compare multiple entities over time, use **grouped_bar** with groupBy, NOT line.
 
+NOTE: `area`, `stacked_bar`, `grouped_bar`, `donut`, `kpi_card` are ONLY available in `mecdm_stat` blocks.
+For `mecdm_viz` chart blocks, only `bar`, `line`, `pie` are supported (with inline data).
+
 ### StatQuery V2 Reference:
 - `version`: 2 (always integer)
 - `source.table`: Any non-blocked table (use `get_stats_schema_summary` to discover)
