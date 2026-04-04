@@ -178,9 +178,10 @@ def main(argv: list[str]) -> None:  # pylint: disable=unused-argument
     # Collect environment variables, filtering out None values and empty strings
     env_var_keys = [
         "ROOT_AGENT_MODEL",
+        "ROOT_AGENT_LOCATION",
         "ANALYTICS_AGENT_MODEL",
         "BASELINE_NL2SQL_MODEL",
-        "CHASE_NL2SQL_MODEL",
+        "ALLOYDB_AGENT_LOCATION",
         "CODE_INTERPRETER_EXTENSION_NAME",
         "NL2SQL_METHOD",
     ]
