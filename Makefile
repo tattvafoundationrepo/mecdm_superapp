@@ -45,7 +45,7 @@ deploy:
 		--source . \
 		--memory "4Gi" \
 		--project $$PROJECT_ID \
-		--region "global" \
+		--region "asia-south2" \
 		--no-allow-unauthenticated \
 		--no-cpu-throttling \
 		--labels "created-by=adk" \
