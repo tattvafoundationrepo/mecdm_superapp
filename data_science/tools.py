@@ -1148,7 +1148,7 @@ def _score_video(video: dict, keywords: list[str], category: str | None) -> int:
         if kw in summary_lower:
             score += 1
 
-    if category and cat_lower == category.lower():
+    if category and category.strip() and cat_lower == category.strip().lower():
         score += 5
 
     return score
@@ -1156,7 +1156,7 @@ def _score_video(video: dict, keywords: list[str], category: str | None) -> int:
 
 async def recommend_video(
     query: str,
-    category: str = None,
+    category: str = "",
     max_results: int = 5,
     tool_context: ToolContext = None,
 ):
