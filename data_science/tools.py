@@ -912,6 +912,21 @@ async def generate_stat_query(
         if query.get("version") != 2:
             query["version"] = 2
 
+        # Normalize dimensions: accept plain strings as shorthand
+        if "dimensions" in query:
+            query["dimensions"] = [
+                {"column": d} if isinstance(d, str) else d
+                for d in query["dimensions"]
+            ]
+
+        # Normalize timeRange: accept start/end as shorthand for custom.from/to
+        tr = query.get("timeRange")
+        if tr and ("start" in tr or "end" in tr):
+            tr["custom"] = {
+                "from": tr.pop("start", ""),
+                "to": tr.pop("end", ""),
+            }
+
         # Validate table is not blocked
         table = query.get("source", {}).get("table", "")
         if table in STATS_BLOCKED_TABLES:
