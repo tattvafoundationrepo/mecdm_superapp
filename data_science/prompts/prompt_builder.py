@@ -386,6 +386,8 @@ chart.options: {title, subtitle, xAxisLabel, yAxisLabel, stacked, showGrid, show
 Use for: Choropleths, bubble maps, facility overlays.
 The frontend executes the query and renders the map — you do NOT need to call call_alloydb_agent first.
 For nearest-facility queries, use `find_nearest_facilities` and include its mecdm_map block verbatim.
+CRITICAL: The query inside mecdm_map MUST include `"version": 2` and all aliases MUST be lowercase.
+For rate calculations, ALWAYS use NULLIF(denominator, 0) to prevent division by zero.
 
 ## mecdm_viz (Inline Visualizations)
 Use for: Pre-computed data, one-off charts, stat_cards with specific values.

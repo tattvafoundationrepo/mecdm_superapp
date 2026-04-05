@@ -133,9 +133,16 @@ This question involves spatial or location-based analysis.
 - **`mecdm_map` block**: For choropleth/bubble maps showing metric distribution
 
 ### mecdm_map block format:
+CRITICAL RULES for the query inside mecdm_map:
+1. ALWAYS include `"version": 2` in the query object — without it, computedColumns are IGNORED.
+2. ALL aliases must be lowercase — PostgreSQL lowercases column names, so `metricColumn` must match.
+3. For rate calculations, ALWAYS use NULLIF to prevent division by zero.
+
+Example — simple metric (no computation needed):
 ```mecdm_map
 {
   "query": {
+    "version": 2,
     "source": {"table": "village_indicators_monthly"},
     "dimensions": [{"column": "district_name", "alias": "district_name"}],
     "measures": [{"column": "total_deliveries", "aggregate": "sum", "alias": "deliveries"}]
@@ -151,10 +158,35 @@ This question involves spatial or location-based analysis.
 }
 ```
 
+Example — computed rate (IDR):
+```mecdm_map
+{
+  "query": {
+    "version": 2,
+    "source": {"table": "village_indicators_monthly"},
+    "dimensions": [{"column": "district_name", "alias": "district_name"}],
+    "measures": [
+      {"column": "institutional_deliveries", "aggregate": "sum", "alias": "inst_del"},
+      {"column": "total_deliveries", "aggregate": "sum", "alias": "total_del"}
+    ],
+    "computedColumns": [
+      {"alias": "idr", "expression": "inst_del * 100.0 / NULLIF(total_del, 0)"}
+    ]
+  },
+  "map": {
+    "mapType": "choropleth",
+    "geographyLevel": "district",
+    "metricColumn": "idr",
+    "joinKey": "district_name"
+  },
+  "title": "Institutional Delivery Rate by District"
+}
+```
+
 ### Map Options:
 - `mapType`: `choropleth` (polygons) or `bubble` (points)
 - `geographyLevel`: `district` (12), `block` (46), or `village` (~2,600)
-- `joinKey`: Dimension alias for geometry join
+- `joinKey`: Dimension alias for geometry join (lowercase)
 - `joinTarget`: "name" (default for district/block) or "code" (default for village)
 - `colorScheme`: optional minColor, maxColor for custom colors
 - `overlays.facilities`: Show PHC/CHC/SC markers
@@ -170,7 +202,7 @@ This question involves spatial or location-based analysis.
   When filtering by district, ALSO include `district_name` in dimensions (enables geographic clipping).
   When filtering by block, ALSO include `block_name`.
   Village maps render as bubble maps (~2,600 matchable points, clipped to target geography).
-- `metricColumn` must EXACTLY match a measure alias in your query.
+- `metricColumn` must EXACTLY match a measure or computedColumn alias (always lowercase).
 
 ### MAP PANEL BEHAVIOR — IMPORTANT:
 When you emit an `mecdm_map` block, the interactive Leaflet map renders automatically in the UI.
