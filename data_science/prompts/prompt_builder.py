@@ -353,7 +353,14 @@ Do NOT call search_policy_rag_engine for simple factual questions like "list dis
 VISUALIZATION_SCHEMA_BLOCK = """
 <VISUALIZATION_SCHEMAS>
 
-You have three visualization output formats. Always use fenced code blocks with the appropriate tag.
+You have three visualization output formats. You MUST use markdown fenced code blocks with the correct tag.
+
+CRITICAL OUTPUT RULES:
+- ALWAYS wrap visualization JSON inside markdown fenced code blocks tagged ```mecdm_viz, ```mecdm_stat, or ```mecdm_map
+- NEVER output raw HTML, <script> tags, <div> elements, or JavaScript code
+- NEVER output Vega-Lite, Vega, or ECharts specifications directly
+- NEVER build charts with DOM manipulation or canvas rendering
+- The frontend ONLY renders JSON inside ```mecdm_* fences — anything else is silently ignored
 
 ## mecdm_stat (Structured Queries — PREFERRED)
 Use for: KPIs, trends, comparisons, rankings from stats-eligible tables.
@@ -377,19 +384,19 @@ Use for: Pre-computed data, one-off charts, stat_cards with specific values.
 IMPORTANT: mecdm_viz `chart` only supports chartType "bar", "line", "pie" — for other chart types use mecdm_stat.
 
 ### stat_cards (2-6 KPI cards)
-```
+```mecdm_viz
 {"type":"stat_cards","cards":[{"label":"Total Deliveries","value":"12,345","trend":"+5%","icon":"baby","color":"#10b981"}]}
 ```
 card fields: label (string), value (string), trend? (string, e.g. "+5%"), icon? (string), color? (hex string)
 
 ### chart (bar/line/pie with inline data)
-```
+```mecdm_viz
 {"type":"chart","chartType":"bar","title":"Deliveries by District","xKey":"district","series":[{"key":"deliveries","label":"Total Deliveries","color":"#3b82f6"}],"data":[{"district":"East Khasi Hills","deliveries":1200}]}
 ```
 fields: type="chart", chartType ("bar"|"line"|"pie" ONLY), title (string), xKey (string), series ([{key, label, color?}]), data (array of objects)
 
 ### table (column defs + inline data)
-```
+```mecdm_viz
 {"type":"table","title":"District Summary","columns":[{"key":"district","label":"District"},{"key":"count","label":"Count"}],"data":[{"district":"East Khasi Hills","count":1200}]}
 ```
 fields: type="table", title? (string), columns ([{key, label}]), data (array of objects)
@@ -416,6 +423,12 @@ Lead with the key insight.
 
 ### **Visualizations**
 Include appropriate mecdm_stat, mecdm_viz, or mecdm_map blocks. Multiple blocks allowed.
+REMINDER: All visualizations MUST be inside ```mecdm_viz, ```mecdm_stat, or ```mecdm_map fenced code blocks.
+
+RIGHT (always do this):
+```mecdm_viz
+{"type":"chart","chartType":"bar","title":"Example","xKey":"district","series":[{"key":"rate","label":"Rate"}],"data":[{"district":"A","rate":10}]}
+```
 
 ### **Recommendations** (only when policy-relevant)
 Format: **<Priority>**: Should include these <Finding with data> <Action> (<Policy citation>)
@@ -581,9 +594,11 @@ def build_instruction_provider(
     (set by the before_agent_callback) and appends matching task-specific
     prompt blocks to the pre-built base instruction.
     """
-    base_instruction = _build_base_instruction(config, dataset, relations, db_schema)
+    base_instruction = _build_base_instruction(
+        config, dataset, relations, db_schema)
     logger.info(
-        "Built base instruction for InstructionProvider: %d chars", len(base_instruction)
+        "Built base instruction for InstructionProvider: %d chars", len(
+            base_instruction)
     )
 
     def instruction_provider(ctx: ReadonlyContext) -> str:
