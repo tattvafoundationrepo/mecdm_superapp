@@ -1076,3 +1076,197 @@ async def read_uploaded_file(
     except Exception as e:
         logger.exception("read_uploaded_file error for %s", gcs_uri)
         return f"Error reading file: {e}"
+
+
+# ============================================================================
+# Training Video Recommendation
+# ============================================================================
+
+_STOP_WORDS = frozenset({
+    "the", "a", "an", "in", "of", "and", "for", "to", "with", "on",
+    "at", "by", "from", "is", "what", "does", "about", "how", "why",
+    "are", "training", "video", "videos", "show", "me", "available",
+    "do", "you", "have",
+})
+
+CATEGORY_META = {
+    "BREASTFEEDING": {"color": "#e91e63", "icon": "baby"},
+    "BREAST_NIPPLE_CONDITIONS": {"color": "#ad1457", "icon": "baby"},
+    "NEWBORN_CARE": {"color": "#2196f3", "icon": "heart-pulse"},
+    "NUTRITION_MICRONUTRIENTS": {"color": "#ff9800", "icon": "apple"},
+    "RECIPES": {"color": "#9c27b0", "icon": "utensils"},
+    "COMPLEMENTARY_FEEDING": {"color": "#4caf50", "icon": "salad"},
+    "PRE_PREGNANCY_MATERNAL": {"color": "#00bcd4", "icon": "heart"},
+    "CHILD_NUTRITION_GROWTH": {"color": "#607d8b", "icon": "ruler"},
+    "FOOD_SAFETY": {"color": "#795548", "icon": "hand-sparkles"},
+}
+
+_video_library_cache: list[dict] | None = None
+
+
+def _load_video_library() -> list[dict]:
+    """Load and cache the video library from the JSON source file."""
+    global _video_library_cache
+    if _video_library_cache is not None:
+        return _video_library_cache
+
+    video_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "mecdm_dataset", "db_20260226", "output", "video_library.json",
+    )
+    try:
+        with open(video_path, encoding="utf-8") as f:
+            _video_library_cache = json.load(f)
+        logger.info("Loaded video library: %d videos", len(_video_library_cache))
+    except FileNotFoundError:
+        logger.warning("Video library not found at %s", video_path)
+        _video_library_cache = []
+    return _video_library_cache
+
+
+def _score_video(video: dict, keywords: list[str], category: str | None) -> int:
+    """Compute weighted relevance score for a video against search keywords."""
+    score = 0
+    tags_lower = " ".join(video.get("tags", [])).lower()
+    title_lower = (video.get("title") or "").lower()
+    indicators_lower = " ".join(video.get("health_indicators", [])).lower()
+    desc_lower = (video.get("description") or "").lower()
+    cat_lower = (video.get("category") or "").lower()
+    summary_lower = (video.get("one_line_summary") or "").lower()
+
+    for kw in keywords:
+        if kw in tags_lower:
+            score += 4
+        if kw in title_lower:
+            score += 3
+        if kw in indicators_lower:
+            score += 2
+        if kw in desc_lower:
+            score += 2
+        if kw in cat_lower:
+            score += 1
+        if kw in summary_lower:
+            score += 1
+
+    if category and cat_lower == category.lower():
+        score += 5
+
+    return score
+
+
+async def recommend_video(
+    query: str,
+    category: str = None,
+    max_results: int = 5,
+    tool_context: ToolContext = None,
+):
+    """Search and recommend health training videos from the CureWell/spoken-tutorial.org
+    video library (49 videos) covering breastfeeding, newborn care, nutrition,
+    complementary feeding, recipes, and food safety.
+
+    Returns video cards with descriptions, watch links, and language availability.
+    Use when users ask for training content, or PROACTIVELY when data shows
+    red flags (low breastfeeding rates, high neonatal deaths, anemia, etc.).
+    Videos are available in English, Khasi, and Garo (select videos).
+
+    Args:
+        query: Search terms describing the topic. Examples:
+            'breastfeeding positions', 'iron rich recipes',
+            'newborn care', 'complementary feeding 6 months'.
+        category: Optional category filter. One of: BREASTFEEDING,
+            BREAST_NIPPLE_CONDITIONS, NEWBORN_CARE, NUTRITION_MICRONUTRIENTS,
+            RECIPES, COMPLEMENTARY_FEEDING, PRE_PREGNANCY_MATERNAL,
+            CHILD_NUTRITION_GROWTH, FOOD_SAFETY.
+        max_results: Number of videos to return (default 5, max 10).
+    """
+    logger.info("recommend_video: query='%s' category=%s", query, category)
+
+    videos = _load_video_library()
+    if not videos:
+        return "Video library not available."
+
+    # Extract and filter keywords
+    keywords = [
+        w for w in query.lower().split()
+        if w not in _STOP_WORDS and len(w) > 1
+    ]
+    if not keywords:
+        keywords = [query.lower().strip()]
+
+    # Score all videos
+    scored = []
+    for video in videos:
+        score = _score_video(video, keywords, category)
+        if score > 0:
+            scored.append((score, video))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    max_n = min(int(max_results), 10)
+    top = scored[:max_n]
+
+    if not top:
+        return (
+            f"No training videos found matching '{query}'. "
+            "Try broader terms like 'breastfeeding', 'nutrition', "
+            "'newborn care', or 'recipes'."
+        )
+
+    # Build text summary for the LLM
+    text_parts = [f"TRAINING VIDEOS FOUND ({len(top)} matches):\n"]
+    # Build structured cards for frontend
+    cards = []
+
+    for score, video in top:
+        langs = video.get("languages", {})
+        lang_parts = []
+        if langs.get("english"):
+            lang_parts.append("EN \u2713")
+        if langs.get("khasi"):
+            lang_parts.append("Khasi \u2713")
+        if langs.get("garo"):
+            lang_parts.append("Garo \u2713")
+        lang_str = " | ".join(lang_parts) if lang_parts else "EN \u2713"
+
+        cat = video.get("category", "")
+        meta = CATEGORY_META.get(cat, {"color": "#607d8b", "icon": "book"})
+
+        text_parts.append(
+            f"--- {video.get('id', '')} ---\n"
+            f"Title: {video.get('title', 'Unknown')}\n"
+            f"Category: {cat} | Duration: ~{video.get('duration_min', 0)} min\n"
+            f"Languages: {lang_str}\n"
+            f"Description: {video.get('description', '')}\n"
+            f"URL: {video.get('url', '')}"
+        )
+
+        cards.append({
+            "id": video.get("id", ""),
+            "title": video.get("title", "Unknown"),
+            "category": cat,
+            "categoryColor": meta["color"],
+            "categoryIcon": meta.get("icon"),
+            "durationMin": video.get("duration_min", 0),
+            "description": video.get("description", ""),
+            "url": video.get("url", ""),
+            "thumbnailUrl": video.get("thumbnail_url"),
+            "languages": langs if isinstance(langs, dict) else {"english": True, "khasi": False, "garo": False},
+            "relevanceScore": score,
+        })
+
+    text_value = "\n\n".join(text_parts)
+    text_value += (
+        "\n\n---\n"
+        "Present these as training resources for frontline workers (ASHA, ANM, Anganwadi). "
+        "Mention language availability where relevant.\n\n"
+        "Include the following block VERBATIM in your response to render video cards:\n\n"
+    )
+
+    viz_block = json.dumps({
+        "type": "video_cards",
+        "title": f"Training Videos: {query}",
+        "cards": cards,
+    }, ensure_ascii=False)
+
+    text_value += f"```mecdm_viz\n{viz_block}\n```"
+
+    return text_value

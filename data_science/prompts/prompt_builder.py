@@ -353,6 +353,14 @@ Do NOT call search_policy_rag_engine for simple factual questions like "list dis
 VISUALIZATION_SCHEMA_BLOCK = """
 <VISUALIZATION_SCHEMAS>
 
+CHART vs MAP — CRITICAL DISTINCTION:
+- mecdm_stat / mecdm_viz = bar charts, line charts, trend graphs, plots, stacked bars, heatmaps.
+  Use when the user says: 'chart', 'bar chart', 'line chart', 'trend', 'graph', 'plot', 'comparison chart'.
+- mecdm_map = geographic choropleth/bubble maps of Meghalaya.
+  Use ONLY when the user explicitly says: 'map', 'choropleth', 'geographic view', 'spatial distribution'.
+- When in doubt, prefer mecdm_stat. Only use mecdm_map for explicit map requests.
+- NEVER substitute a map when the user asks for a chart, or vice versa.
+
 You have three visualization output formats. You MUST use markdown fenced code blocks with the correct tag.
 
 CRITICAL OUTPUT RULES:

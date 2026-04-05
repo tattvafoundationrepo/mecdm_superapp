@@ -15,6 +15,7 @@ TASK_TYPES = (
     "comparison",
     "geographic",
     "policy",
+    "training",
     "general",
 )
 
@@ -202,6 +203,24 @@ _RULES: list[_TaskRules] = [
             _rx(r"\bhow\s+to\s+improve\b", 1.0),
             _rx(r"\baction\s+plan\b", 1.2),
             _rx(r"\bbest\s+practice\b", 1.0),
+        ],
+    ),
+    _TaskRules(
+        "training",
+        [
+            _kw("training", 1.2),
+            _kw("video", 1.2),
+            _kw("videos", 1.2),
+            _kw("educational", 1.0),
+            _kw("learning", 0.8),
+            _kw("tutorial", 1.0),
+            _kw("tutorials", 1.0),
+            _kw("teach", 0.8),
+            _kw("capacity building", 1.2),
+            _rx(r"\btraining\s+(video|material|content|resource)s?\b", 1.5),
+            _rx(r"\b(ASHA|ANM|AWW|Anganwadi)\s+(training|capacity)\b", 1.5),
+            _rx(r"\bhow\s+to\s+(breastfeed|cook|prepare)\b", 1.2),
+            _rx(r"\brecommend.*(video|training)\b", 1.5),
         ],
     ),
     _TaskRules(

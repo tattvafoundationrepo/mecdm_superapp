@@ -57,6 +57,7 @@ from .tools import (
     get_stats_schema_summary,
     get_weather_data,
     read_uploaded_file,
+    recommend_video,
     search_policy_rag_engine,
 )
 
@@ -255,6 +256,7 @@ def create_root_agent() -> LlmAgent:
         # --- Supporting tools ---
         find_nearest_facilities,
         search_policy_rag_engine,
+        recommend_video,
         get_current_datetime,
         get_weather_data,
         get_historical_weather_data,

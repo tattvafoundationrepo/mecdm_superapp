@@ -39,6 +39,8 @@ Workflow:
 
 For trends: always specify the time column (`year_month`) and aggregation level (district/block).
 For rates: use NULLIF to avoid division by zero, note when denominators are small (<30).
+
+After analysis revealing poor indicators, offer: 'I can also suggest relevant health training videos for frontline workers.'
 </TASK_GUIDANCE>
 """.strip(),
 
@@ -159,6 +161,55 @@ This question involves spatial or location-based analysis.
 - `overlays.awc`: Show Anganwadi markers
 - `geoFilter`: Optional district_name to scope block maps to a single district
 
+### MAP GENERATION — Geography Level Rules:
+- **district**: Query must return `district_name` + numeric metric. `joinKey: "district_name"`.
+- **block**: Query must return `block_name` + numeric metric. `joinKey: "block_name"`.
+  For block maps within a single district, add `"geoFilter": {"district_name": "<name>"}`.
+- **village**: Query must return `village_code_lgd` (integer) + numeric metric.
+  Use `joinKey: "village_code_lgd"`, `joinTarget: "code"`.
+  When filtering by district, ALSO include `district_name` in dimensions (enables geographic clipping).
+  When filtering by block, ALSO include `block_name`.
+  Village maps render as bubble maps (~2,600 matchable points, clipped to target geography).
+- `metricColumn` must EXACTLY match a measure alias in your query.
+
+### MAP PANEL BEHAVIOR — IMPORTANT:
+When you emit an `mecdm_map` block, the interactive Leaflet map renders automatically in the UI.
+Do NOT apologize or say "I cannot show a map" — the map IS showing.
+In your response after the mecdm_map block:
+1. Describe geographic patterns in the data (which regions are highest/lowest)
+2. Highlight specific districts/blocks with notable values
+3. Mention that users can hover for details and click for popups
+4. If facility overlay is enabled, mention the layer toggle in the top-right corner
+
+### FACILITY OVERLAY — `overlays.facilities`:
+- Set `true` when the user asks about facilities, health infrastructure, service coverage, or facility access alongside an indicator.
+- Trigger phrases: "show facilities", "overlay facilities", "with health centres", "show health infrastructure", "facility access".
+- Facilities are auto-filtered to the same geographic scope as the base map.
+- Use with village maps to show delivery/registration volumes alongside nearby facilities.
+- Use with district/block choropleths to show facility distribution alongside indicator heat.
+- Do NOT enable when the user is only asking about indicator data with no facility context.
+- Marker colors: DH=red, CHC=orange, PHC=blue, SC=green (distinct colored circles with layer toggle).
+
+### AWC (ANGANWADI CENTRE) OVERLAY — `overlays.awc`:
+- Set `true` when the user asks about Anganwadi centres, ICDS centres, AWC locations, nutrition infrastructure, or child development coverage.
+- Trigger phrases: "show AWCs", "Anganwadi centres", "AWC coverage", "ICDS", "nutrition centres".
+- AWC markers: small teal/cyan circles (distinct from village data bubbles and facility markers).
+- AWCs are auto-filtered to the same geographic scope as the base map.
+- You can use BOTH `overlays.facilities` AND `overlays.awc` simultaneously.
+
+### SPATIAL QUERIES — `find_nearest_facilities`:
+- Use when the user asks about nearest/closest facilities or AWCs to a village.
+- ALWAYS provide `from_block` when you know it to disambiguate village names (many repeat across blocks).
+- `to_type` mapping: 'hospital'→DH, 'health centre'/'CHC'→CHC, 'PHC'→PHC, 'sub-centre'/'SC'→SC, 'AWC'/'Anganwadi'→AWC, 'any facility'→ANY_FACILITY, 'any'→ANY.
+- If user says 'nearest' (singular), use count=1. 'nearest 3'→count=3, 'top 10'→count=10.
+- IMPORTANT: When user asks for multiple facility types together (e.g. 'nearest SC, PHC and AWC',
+  'show all nearby facilities and AWCs'), use `to_type='ANY'` with a higher count (e.g. count=10).
+  This shows ALL types on ONE map with different colored markers. NEVER make separate calls per type.
+- For radius queries ('within 5km', 'in a 10km radius'), set `max_distance_km` parameter.
+  You can combine radius + count: 'top 3 within 10km' → count=3, max_distance_km=10.
+- Distances are straight-line (great-circle). Mention that road distances will be longer.
+- Do NOT use `mecdm_map` for distance queries — use `find_nearest_facilities` instead.
+
 ### Steps:
 1. Build the data query (StatQuery V2 format) for the metric
 2. Wrap it in an `mecdm_map` block with appropriate mapType and geographyLevel
@@ -183,6 +234,38 @@ Workflow:
    - 4+ ANC visits: ≥75%
    - Full immunization: ≥90%
 
+After policy recommendations, suggest relevant training videos via `recommend_video` when the data shows red flags that training could address.
+</TASK_GUIDANCE>
+""".strip(),
+
+    "training": """
+<TASK_GUIDANCE: TRAINING>
+This question involves training videos or educational content for frontline workers.
+
+### Tool: `recommend_video(query, category?, max_results?)`
+- Returns matching training videos with descriptions, watch links, and language availability.
+- The tool returns an mecdm_viz video_cards block — include it VERBATIM in your response.
+
+### When to call recommend_video:
+- User explicitly asks for training videos, educational content, or learning resources.
+- PROACTIVELY suggest when data reveals red flags:
+  * Institutional delivery <60% → query: 'newborn care Kangaroo Mother Care'
+  * Low breastfeeding / high neonatal deaths → query: 'breastfeeding techniques'
+  * High anemia / low IFA → query: 'iron rich recipes', category: RECIPES
+  * Low ANC / poor nutrition → query: 'nutrition during pregnancy'
+  * Low birth weight → query: 'breastfeeding low birth weight baby KMC'
+  * Anganwadi / community analysis → query: 'growth monitoring complementary feeding'
+  * Food safety concerns → query: 'hygienic cooking safe drinking water'
+
+### Categories (use for category parameter):
+BREASTFEEDING, BREAST_NIPPLE_CONDITIONS, NEWBORN_CARE, NUTRITION_MICRONUTRIENTS,
+RECIPES, COMPLEMENTARY_FEEDING, PRE_PREGNANCY_MATERNAL, CHILD_NUTRITION_GROWTH, FOOD_SAFETY
+
+### Response pattern:
+1. Show data analysis first (if applicable)
+2. Include the video cards block returned by the tool
+3. Mention language availability (English, Khasi, Garo)
+4. Frame as resources for frontline workers (ASHA, ANM, Anganwadi)
 </TASK_GUIDANCE>
 """.strip(),
 
