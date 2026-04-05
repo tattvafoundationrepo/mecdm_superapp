@@ -799,7 +799,7 @@ def _get_v2_llm_client():
     global _v2_llm_client
     if _v2_llm_client is None:
         vertex_project = os.getenv("GOOGLE_CLOUD_PROJECT", None)
-        location = os.getenv("ROOT_AGENT_LOCATION", os.getenv("GOOGLE_CLOUD_LOCATION", "global"))
+        location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
         http_options = HttpOptions(headers={"user-agent": USER_AGENT})
         _v2_llm_client = Client(
             vertexai=True,

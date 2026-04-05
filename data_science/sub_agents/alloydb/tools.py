@@ -24,7 +24,7 @@ MCP_TOOLBOX_PORT = os.getenv("MCP_TOOLBOX_PORT", "5000")
 # MAX_NUM_ROWS = 80
 
 vertex_project = os.getenv("GOOGLE_CLOUD_PROJECT", None)
-location = os.getenv("ALLOYDB_AGENT_LOCATION", os.getenv("GOOGLE_CLOUD_LOCATION", "global"))
+location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
 http_options = HttpOptions(headers={"user-agent": USER_AGENT})
 llm_client = Client(
     vertexai=True,
