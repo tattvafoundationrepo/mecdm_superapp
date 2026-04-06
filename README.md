@@ -140,17 +140,21 @@ backend/
 │   ├── routers/
 │   │   ├── chat.py                      # Chat session & message endpoints
 │   │   ├── feedback.py                  # User feedback endpoints
-│   │   └── upload.py                    # File upload endpoint (GCS)
+│   │   ├── upload.py                    # File upload endpoint (GCS)
+│   │   └── whatsapp.py                  # WhatsApp webhook (Meta Cloud API)
 │   │
 │   ├── utils/
 │   │   ├── map_utils.py                 # PostGIS geometry joining, GeoJSON building
 │   │   └── utils.py                     # General utilities
 │   │
 │   ├── services/
-│   │   └── file_processor.py            # File upload validation, GCS storage, text extraction
+│   │   ├── file_processor.py            # File upload validation, GCS storage, text extraction
+│   │   ├── whatsapp_service.py          # WhatsApp channel: citizen agent, Meta API, sessions
+│   │   └── whatsapp_formatter.py        # Agent response → WhatsApp text formatting
 │   │
 │   └── app_utils/
 │       ├── models.py                    # SQLAlchemy models (ChatSession, ChatMessage, Feedback, UserPreferences, GoldenSql)
+│       ├── whatsapp_models.py           # Pydantic models for Meta webhook payloads
 │       ├── sql_validator.py             # pglast-based SQL injection prevention
 │       ├── expression_validator.py      # Expression validation
 │       ├── telemetry.py                 # OpenTelemetry + Google Cloud Logging
@@ -194,6 +198,147 @@ backend/
 - Health data uses UPPERCASE names; census uses Title Case
 - Prefer integer code joins (`district_code_lgd`, `block_code_lgd`) over name joins
 - `mother_journeys` / `anc_visits`: all columns are TEXT -- cast to numeric/date as needed
+
+## WhatsApp Integration (Citizen Channel)
+
+The backend includes a WhatsApp channel that exposes the **Citizen persona** agent via Meta's official WhatsApp Business Cloud API. Citizens can query health facility locations, program eligibility, and general health information directly from WhatsApp -- no app install required.
+
+### Architecture
+
+```
+               WhatsApp User
+                    |
+            Meta Cloud API
+                    |
+     POST /whatsapp/webhook (FastAPI)
+                    |
+            +----- 200 OK (immediate) -----+
+            |                               |
+     BackgroundTask                   (Meta satisfied)
+            |
+     WhatsAppService (singleton)
+            |
+    +-------+--------+--------+
+    |        |        |        |
+  Session  ADK      Format   Meta API
+  Lookup   Runner   Response  (send reply)
+    |        |
+  ADK DB   Citizen Agent
+           (Gemini 2.5, Persona=CITIZEN)
+```
+
+### How It Works
+
+1. **Meta sends a POST** to `/whatsapp/webhook` with the user's message
+2. **Router returns 200 immediately** (Meta requires response within 5 seconds) and queues processing as a `BackgroundTask`
+3. **WhatsAppService** looks up or creates an ADK session for the phone number (user ID format: `wa_{phone}`)
+4. A **dedicated Citizen-persona agent** (separate from the web agent) processes the message through the same tool pipeline (AlloyDB, policy search, facility finder, etc.)
+5. The agent response is **formatted for WhatsApp**: visualization blocks (`mecdm_stat`, `mecdm_viz`, `mecdm_map`) are stripped, markdown is converted to WhatsApp formatting (`*bold*`, `_italic_`), and long messages are split at paragraph boundaries (max 4096 chars per message)
+6. The formatted response is **sent back via Meta Cloud API**
+
+### Key Design Decisions
+
+- **Separate agent instance** -- The WhatsApp service creates its own `LlmAgent` with `Persona.CITIZEN` hardcoded, so the web agent's persona configuration is unaffected
+- **Session isolation** -- Uses `app_name="whatsapp_citizen"` to namespace WhatsApp sessions separately from web sessions in the same database
+- **Per-phone locking** -- An `asyncio.Lock` per phone number prevents race conditions when a user sends multiple messages rapidly
+- **No visualization blocks** -- Since WhatsApp can't render charts/maps, the agent's `include_visualization_guide` is set to `False` and any remaining viz blocks are stripped in the formatter
+- **Graceful error handling** -- If the agent fails, the user receives a friendly "try again" message rather than silence
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `data_science/routers/whatsapp.py` | Webhook endpoints (GET for verification, POST for messages) |
+| `data_science/services/whatsapp_service.py` | Core service: citizen agent, ADK Runner, session management, Meta API calls |
+| `data_science/services/whatsapp_formatter.py` | Response formatting: strip viz blocks, markdown-to-WhatsApp conversion, message splitting |
+| `data_science/app_utils/whatsapp_models.py` | Pydantic models for Meta webhook payloads |
+
+### Environment Variables
+
+```bash
+# WhatsApp Business API (Meta Cloud API)
+WHATSAPP_VERIFY_TOKEN=<random-string-you-choose>       # Webhook verification token
+WHATSAPP_ACCESS_TOKEN=<meta-access-token>               # From Meta Developer Console
+WHATSAPP_PHONE_NUMBER_ID=<phone-number-id>              # From Meta Business Manager
+WHATSAPP_API_VERSION=v21.0                              # Meta Graph API version (optional)
+```
+
+### Setup Guide
+
+#### 1. Create a Meta Business App
+
+1. Go to [Meta for Developers](https://developers.facebook.com/) and create a new app (type: **Business**)
+2. Add the **WhatsApp** product to your app
+3. In the WhatsApp section, you'll find:
+   - **Temporary access token** (for testing; generate a permanent one via System User for production)
+   - **Phone number ID** (the ID of your WhatsApp Business phone number)
+   - **Test phone number** (Meta provides a free test number for development)
+
+#### 2. Configure the Webhook
+
+1. In your Meta App dashboard, go to **WhatsApp > Configuration**
+2. Click **Edit** on the Webhook section
+3. Enter your webhook URL: `https://<your-domain>/whatsapp/webhook`
+   - For local development, use [ngrok](https://ngrok.com/): `ngrok http 8000` and use the generated HTTPS URL
+4. Enter your `WHATSAPP_VERIFY_TOKEN` (the same value you set in `.env`)
+5. Click **Verify and Save**
+6. Subscribe to the **messages** webhook field
+
+#### 3. Add Environment Variables
+
+Add the following to your `.env` file:
+
+```bash
+WHATSAPP_VERIFY_TOKEN=my-secret-verify-token
+WHATSAPP_ACCESS_TOKEN=EAAxxxxxxxxx...
+WHATSAPP_PHONE_NUMBER_ID=123456789012345
+```
+
+#### 4. Test the Integration
+
+```bash
+# Test webhook verification
+curl "http://localhost:8000/whatsapp/webhook?hub.mode=subscribe&hub.verify_token=my-secret-verify-token&hub.challenge=test123"
+# Expected: test123
+
+# Start the backend
+make local-backend
+
+# Send a test message from WhatsApp to your business number
+# Example: "Where is the nearest health facility in Shillong?"
+```
+
+#### 5. Production Deployment
+
+For production use with Cloud Run:
+
+1. **Generate a permanent access token**: Create a System User in Meta Business Manager, assign WhatsApp permissions, and generate a token
+2. **Set environment variables** in your Cloud Run service (or Secret Manager)
+3. **Configure the webhook URL** to point to your Cloud Run service: `https://<cloud-run-url>/whatsapp/webhook`
+4. **Request API access**: Submit your app for App Review to get production-level messaging access (beyond the 5 test numbers allowed in development mode)
+
+### Response Formatting
+
+The formatter handles the conversion from rich agent output to WhatsApp-compatible plain text:
+
+| Agent Output | WhatsApp Output |
+|---|---|
+| `mecdm_stat` / `mecdm_viz` / `mecdm_map` blocks | Replaced with "[View detailed visualization on the MECDM web portal]" |
+| `**bold text**` | `*bold text*` (WhatsApp bold) |
+| `[link text](url)` | `link text (url)` |
+| `### Header` | `*Header*` (bold) |
+| `- bullet item` | `bullet item` |
+| Messages > 4096 chars | Split at paragraph boundaries into multiple messages |
+
+### Session Continuity
+
+Each WhatsApp phone number gets a persistent ADK session. This means:
+
+- Follow-up questions work naturally ("What about East Khasi Hills?" after asking about district coverage)
+- The agent remembers context from previous messages in the conversation
+- Sessions are stored in the same PostgreSQL database as web sessions (but namespaced under `app_name="whatsapp_citizen"`)
+
+---
 
 ## Design Decisions
 
