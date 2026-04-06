@@ -315,6 +315,8 @@ Call `call_alloydb_agent(question)` — it handles table selection, SQL generati
 |---|---|
 | Frontend chart/table JSON (StatQuery V2) | `generate_stat_query(question)` |
 
+CRITICAL: For any `mecdm_stat` block, you MUST call `generate_stat_query(question)` to produce the query JSON.
+NEVER construct StatQuery V2 JSON manually — hand-written queries will fail.
 Embed the returned STAT_QUERY_JSON directly as the "query" field in your mecdm_stat block.
 
 ### Step 4: Recommend (only when data shows red flags or user asks for policy)
@@ -372,11 +374,13 @@ CRITICAL OUTPUT RULES:
 
 ## mecdm_stat (Structured Queries — PREFERRED)
 Use for: KPIs, trends, comparisons, rankings from stats-eligible tables.
-PREFERRED: Call `generate_stat_query(question)` — it builds StatQuery V2 JSON, validates it, executes it, and returns both the JSON and actual data.
+REQUIRED: You MUST call `generate_stat_query(question)` to produce the query JSON. NEVER write StatQuery JSON yourself.
+- `generate_stat_query` builds StatQuery V2 JSON, validates it, executes it, and returns both the JSON and actual data
 - Embed the returned STAT_QUERY_JSON directly as the "query" field in your mecdm_stat block
-- Do NOT rewrite or re-create the query JSON — only add "chart", "name", "description" around it
+- Do NOT rewrite, re-create, or hand-craft the query JSON — only add "chart", "name", "description" around it
 - Base textual insights on the actual QUERY_RESULTS, not assumptions
-FALLBACK for CTEs/UNION: use `call_alloydb_agent` + `mecdm_viz`.
+- If you already have data from `call_alloydb_agent`, you MUST still call `generate_stat_query` for any mecdm_stat block
+FALLBACK for CTEs/UNION that cannot be expressed as StatQuery V2: use `call_alloydb_agent` + `mecdm_viz` (inline data).
 
 Supported chart types for mecdm_stat: bar, line, area, pie, donut, kpi_card, stacked_bar, grouped_bar, table
 chart.mapping: {xAxis, yAxis (string or string[]), value (for kpi_card), label (for pie), groupBy}

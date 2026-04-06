@@ -912,6 +912,22 @@ async def generate_stat_query(
         if query.get("version") != 2:
             query["version"] = 2
 
+        # Normalize field name hallucinations: "field" → "column", "aggregation" → "aggregate"
+        for dim in query.get("dimensions", []):
+            if "field" in dim and "column" not in dim:
+                dim["column"] = dim.pop("field")
+        for m in query.get("measures", []):
+            if "field" in m and "column" not in m:
+                m["column"] = m.pop("field")
+            if "aggregation" in m and "aggregate" not in m:
+                m["aggregate"] = m.pop("aggregation")
+        for f in query.get("filters", []):
+            if "field" in f and "column" not in f:
+                f["column"] = f.pop("field")
+        for h in query.get("having", []):
+            if "field" in h and "column" not in h:
+                h["column"] = h.pop("field")
+
         # Normalize dimensions: accept plain strings as shorthand
         if "dimensions" in query:
             query["dimensions"] = [
