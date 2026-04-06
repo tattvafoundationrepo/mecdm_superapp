@@ -749,7 +749,8 @@ def _compile_stat_query_v2_to_sql(query: dict) -> str:
             ob_parts = []
             for o in order_by:
                 direction = o.get("direction", "asc").upper()
-                ob_parts.append(f"{_qi(o['column'])} {direction}")
+                nulls = " NULLS LAST" if direction == "DESC" else ""
+                ob_parts.append(f"{_qi(o['column'])} {direction}{nulls}")
             order_str = f"ORDER BY {', '.join(ob_parts)}"
 
         sql = f"SELECT {', '.join(select_parts)} FROM {from_clause} {where_str} {group_by_str} {having_str} {order_str} LIMIT {limit}"
@@ -785,7 +786,8 @@ def _compile_stat_query_v2_to_sql(query: dict) -> str:
         ob_parts = []
         for o in order_by:
             direction = o.get("direction", "asc").upper()
-            ob_parts.append(f"{_qi(o['column'])} {direction}")
+            nulls = " NULLS LAST" if direction == "DESC" else ""
+            ob_parts.append(f"{_qi(o['column'])} {direction}{nulls}")
         order_str = f"ORDER BY {', '.join(ob_parts)}"
 
     sql = f"SELECT {', '.join(outer_select)} FROM ({inner_sql}) AS _inner {outer_where} {order_str} LIMIT {limit}"
