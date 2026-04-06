@@ -40,7 +40,7 @@ The backend powers a conversational AI agent that lets users query maternal-chil
                  +------------------+------------------+
                  |                  |                  |
           AlloyDB Agent      Analytics Agent     Direct Tools
-          (NL2SQL)           (NL2Py)             (12 tools)
+          (NL2SQL)           (NL2Py)             (14 tools)
                  |                  |
           MCP Toolbox        Vertex AI Code
           execute_sql        Executor
@@ -61,7 +61,7 @@ The backend powers a conversational AI agent that lets users query maternal-chil
 - **AlloyDB Agent** -- translates natural language to PostgreSQL, executes queries via MCP Toolbox, returns tabular results
 - **Analytics Agent** -- takes query results, generates Python code for statistical analysis, returns structured JSON output
 
-### Root Agent Tools (12)
+### Root Agent Tools (14)
 
 | Tool | Purpose |
 |---|---|
@@ -70,8 +70,10 @@ The backend powers a conversational AI agent that lets users query maternal-chil
 | `generate_stat_query` | Build StatQuery V2 JSON blocks for interactive frontend charts |
 | `find_nearest_facilities` | Spatial distance queries (nearest PHC/SC/CHC/DH/AWC) |
 | `search_policy_rag_engine` | Search Meghalaya Government policy documents |
+| `recommend_video` | Search and recommend videos from the curated video library |
 | `get_stats_schema_summary` | List stats-eligible tables and columns |
 | `get_predefined_stats_catalog` | Return 10 predefined KPI templates |
+| `read_uploaded_file` | Read and extract text from uploaded files (PDF, DOCX, XLSX, images) |
 | `export_data_to_csv` | Export query results to CSV |
 | `get_current_datetime` | Current date/time for relative queries |
 | `get_weather_data` | Current weather via Open-Meteo API |
@@ -120,7 +122,7 @@ backend/
 ├── main.py                              # Cloud Run entry point
 ├── data_science/
 │   ├── agent.py                         # Root agent definition, dataset config loading
-│   ├── tools.py                         # 12 root-level tools
+│   ├── tools.py                         # 14 root-level tools
 │   ├── fast_api_app.py                  # FastAPI app factory (production)
 │   │
 │   ├── prompts/
@@ -137,11 +139,15 @@ backend/
 │   │
 │   ├── routers/
 │   │   ├── chat.py                      # Chat session & message endpoints
-│   │   └── feedback.py                  # User feedback endpoints
+│   │   ├── feedback.py                  # User feedback endpoints
+│   │   └── upload.py                    # File upload endpoint (GCS)
 │   │
 │   ├── utils/
 │   │   ├── map_utils.py                 # PostGIS geometry joining, GeoJSON building
 │   │   └── utils.py                     # General utilities
+│   │
+│   ├── services/
+│   │   └── file_processor.py            # File upload validation, GCS storage, text extraction
 │   │
 │   └── app_utils/
 │       ├── models.py                    # SQLAlchemy models (ChatSession, ChatMessage, Feedback, UserPreferences, GoldenSql)
@@ -152,7 +158,7 @@ backend/
 │       └── typing.py                    # Type definitions
 │
 ├── dataset_mecdm.json                   # Dataset config (25 tables, domains, stats rules)
-├── cross_dataset_relations.json         # 18 foreign key relationships
+├── cross_dataset_relations.json         # 13 foreign key relationships
 ├── pyproject.toml                       # Dependencies
 ├── Makefile                             # Dev, deploy, test commands
 ├── Dockerfile                           # Container build
@@ -321,6 +327,6 @@ make setup-dev-env
 | File | Purpose |
 |---|---|
 | `dataset_mecdm.json` | Defines all 25 tables, their descriptions, columns, domains, and stats rules |
-| `cross_dataset_relations.json` | 18 foreign key relationships between tables (e.g., `mother_journeys` <-> `anc_visits` via `mother_id`) |
+| `cross_dataset_relations.json` | 13 foreign key relationships between tables (e.g., `mother_journeys` <-> `anc_visits` via `mother_id`) |
 | `toolbox-alloydb-local.yaml` | MCP Toolbox config for local AlloyDB connection |
 | `toolbox-alloydb-remote.yaml` | MCP Toolbox config for Cloud Run deployment |
