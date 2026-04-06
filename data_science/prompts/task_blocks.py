@@ -5,8 +5,17 @@ Each block provides focused guidance that is injected into the system instructio
 when the user's message matches the corresponding task type.
 """
 
+_VIZ_TOOL_REMINDER = """
+### Visualization Requirement
+When producing any chart, table, or KPI visualization (mecdm_stat block):
+1. Retrieve data first (execute_sql or call_alloydb_agent)
+2. Call `generate_stat_query(question)` — it returns validated StatQuery V2 JSON + actual results
+3. Embed the returned STAT_QUERY_JSON as the "query" field in your mecdm_stat block
+4. NEVER hand-write or fabricate StatQuery JSON — the query MUST come from generate_stat_query
+""".strip()
+
 TASK_BLOCKS: dict[str, str] = {
-    "data_query": """
+    "data_query": ("""
 <TASK_GUIDANCE: DATA_QUERY>
 This question requires data retrieval. Follow this optimized path:
 
@@ -16,10 +25,10 @@ This question requires data retrieval. Follow this optimized path:
    `list_tables(schema_names="public", table_names="<table>")` → inspect columns → `execute_sql(<query>)`
 3. **Delegate for complex queries (3+ tables, ambiguous):** `call_alloydb_agent(question)`
 4. **Return data first**, then optionally visualize. Never skip showing the actual numbers.
-</TASK_GUIDANCE>
-""".strip(),
 
-    "analysis": """
+"""  + _VIZ_TOOL_REMINDER + "\n</TASK_GUIDANCE>").strip(),
+
+    "analysis": ("""
 <TASK_GUIDANCE: ANALYSIS>
 This question requires statistical analysis or trend computation.
 
@@ -41,8 +50,8 @@ For trends: always specify the time column (`year_month`) and aggregation level 
 For rates: use NULLIF to avoid division by zero, note when denominators are small (<30).
 
 After analysis revealing poor indicators, offer: 'I can also suggest relevant health training videos for frontline workers.'
-</TASK_GUIDANCE>
-""".strip(),
+
+"""  + _VIZ_TOOL_REMINDER + "\n</TASK_GUIDANCE>").strip(),
 
     "visualization": """
 <TASK_GUIDANCE: VISUALIZATION>
@@ -105,7 +114,7 @@ For other tables, call `get_stats_schema_summary` to discover columns.
 </TASK_GUIDANCE>
 """.strip(),
 
-    "comparison": """
+    "comparison": ("""
 <TASK_GUIDANCE: COMPARISON>
 This question compares multiple entities (districts, blocks, indicators).
 
@@ -120,8 +129,8 @@ Always:
 - Highlight entities exceeding red-flag thresholds
 - Use consistent ordering (descending by the primary metric unless user specifies otherwise)
 - For "which district is best/worst" queries: retrieve data first, then visualize the ranking
-</TASK_GUIDANCE>
-""".strip(),
+
+"""  + _VIZ_TOOL_REMINDER + "\n</TASK_GUIDANCE>").strip(),
 
     "geographic": """
 <TASK_GUIDANCE: GEOGRAPHIC>
