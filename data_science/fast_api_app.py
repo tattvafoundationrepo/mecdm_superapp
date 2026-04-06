@@ -24,6 +24,7 @@ from data_science.app_utils.telemetry import setup_telemetry
 from data_science.routers.chat import router as chat_router
 from data_science.routers.feedback import router as feedback_router
 from data_science.routers.upload import router as upload_router
+from data_science.routers.whatsapp import router as whatsapp_router
 
 setup_telemetry()
 _, project_id = google.auth.default()
@@ -93,6 +94,7 @@ app.description = "API for interacting with the Agent mecdm-super-agent"
 app.include_router(chat_router)
 app.include_router(feedback_router)
 app.include_router(upload_router)
+app.include_router(whatsapp_router)
 
 
 # Main execution
