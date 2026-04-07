@@ -708,6 +708,7 @@ NHM_DDL = [
         device_model         TEXT,
         app_version          TEXT,
         gps_location         TEXT,
+        geom                 geometry(Point,4326),
         instance_name        TEXT,
         created_at           TIMESTAMPTZ,
         modified_at          TIMESTAMPTZ
@@ -902,6 +903,7 @@ def _flatten_nhm_record(rec: dict):
         _to_str(src.get("Devicemodel")),
         _to_str(src.get("AppVersion")),
         _to_str(src.get("Location")),
+        None,  # geom — populated post-load by apply_nhm_geom() from gps_location
         _to_str(src.get("InstanceName")),
         _to_ts(rec.get("createdAt")),
         _to_ts(rec.get("modifiedAt")),
@@ -1062,7 +1064,7 @@ _NHM_MOTHER_COLS = (
     "address_res", "shg_member", "epic_id_of_woman", "mcts_rch_id",
     "mobile_number", "mobile_belongs_to", "abha_id", "abha_address", "mhis_id",
     "username", "device_id", "device_model", "app_version", "gps_location",
-    "instance_name", "created_at", "modified_at",
+    "geom", "instance_name", "created_at", "modified_at",
 )
 _NHM_PREG_COLS = (
     "record_id", "pregnancy_num", "age_of_mother", "lmp", "lmp_disp",
@@ -1502,6 +1504,7 @@ def apply_indexes(engine):
         "CREATE INDEX IF NOT EXISTS idx_nhm_mothers_block        ON nhm_mothers (block_res);",
         "CREATE INDEX IF NOT EXISTS idx_nhm_mothers_sangrah      ON nhm_mothers (sangrah_id);",
         "CREATE INDEX IF NOT EXISTS idx_nhm_mothers_modified     ON nhm_mothers (modified_at);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_mothers_geom         ON nhm_mothers USING GIST (geom);",
         "CREATE INDEX IF NOT EXISTS idx_nhm_preg_lmp             ON nhm_pregnancies (lmp);",
         "CREATE INDEX IF NOT EXISTS idx_nhm_preg_edd             ON nhm_pregnancies (edd);",
         "CREATE INDEX IF NOT EXISTS idx_nhm_preg_district        ON nhm_pregnancies (district);",
@@ -1639,6 +1642,37 @@ def apply_spatial_enrichment(engine):
         "CREATE INDEX IF NOT EXISTS idx_master_villages_geom     ON master_villages          USING GIST (geom);",
         "CREATE INDEX IF NOT EXISTS idx_master_hf_geom           ON master_health_facilities USING GIST (geom);",
     ], "spatial_enrich_indexes")
+
+
+def apply_nhm_geom(engine):
+    """
+    Populate nhm_mothers.geom from the textual gps_location captured by the
+    Mother App device. The format is "lat lon altitude accuracy" (space-
+    separated). Rows whose first two tokens don't parse as plausible
+    Meghalaya coordinates (lat 24–27, lon 89–93) are left NULL.
+    """
+    logger.info("Populating nhm_mothers.geom from gps_location…")
+    sql = """
+    UPDATE nhm_mothers
+    SET    geom = ST_SetSRID(
+                    ST_MakePoint(
+                        NULLIF(split_part(gps_location, ' ', 2), '')::double precision,
+                        NULLIF(split_part(gps_location, ' ', 1), '')::double precision
+                    ), 4326)
+    WHERE  gps_location IS NOT NULL
+      AND  gps_location <> ''
+      AND  split_part(gps_location, ' ', 1) ~ '^-?[0-9]+(\\.[0-9]+)?$'
+      AND  split_part(gps_location, ' ', 2) ~ '^-?[0-9]+(\\.[0-9]+)?$'
+      AND  split_part(gps_location, ' ', 1)::double precision BETWEEN 24 AND 27
+      AND  split_part(gps_location, ' ', 2)::double precision BETWEEN 89 AND 93;
+    """
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(sql))
+            logger.info("  ✓ nhm_mothers.geom: %d rows populated",
+                        result.rowcount)
+    except Exception as exc:
+        logger.warning("[nhm_geom] failed: %s", str(exc)[:240])
 
 
 def apply_nhm_views(engine):
@@ -2077,6 +2111,7 @@ def run_migration(args):
         apply_foreign_keys(engine)
         apply_indexes(engine)
         apply_spatial_enrichment(engine)
+        apply_nhm_geom(engine)
         apply_nhm_views(engine)
         apply_comments(engine)
 
