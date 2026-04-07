@@ -870,7 +870,8 @@ def _flatten_nhm_record(rec: dict):
         _to_ts(rec.get("modifiedAt")),
         rec.get("createdBy"),
         rec.get("modifiedBy"),
-        json.dumps(rec, ensure_ascii=False),  # JSONB payload (psycopg2 → ::jsonb)
+        # JSONB payload (psycopg2 → ::jsonb)
+        json.dumps(rec, ensure_ascii=False),
     )
 
     # ── nhm_mothers ────────────────────────────────────────────────────────
@@ -966,10 +967,12 @@ def _flatten_nhm_record(rec: dict):
             if not isinstance(v, dict) or not v:
                 continue
             basic = v.get(f"ANC_basic_parameter_grp_{n}") or {}
-            usg = (((v.get(f"usg_grp_anc_{n}") or {}).get(f"usg_details_grp_anc_{n}")) or {})
+            usg = (((v.get(f"usg_grp_anc_{n}") or {}).get(
+                f"usg_details_grp_anc_{n}")) or {})
             anc_rows.append((
                 rid, pn, n,
-                _to_ts(v.get(f"date_of_ANC_{n}") or v.get(f"anc{n}_timestamp")),
+                _to_ts(v.get(f"date_of_ANC_{n}")
+                       or v.get(f"anc{n}_timestamp")),
                 _to_float(basic.get(f"weight_in_Kgs_{n}")),
                 _to_float(basic.get(f"haemoglobin_in_grams_{n}")),
                 _to_float(basic.get(f"upper_systolic_pressure_{n}")),
@@ -1003,9 +1006,11 @@ def _flatten_nhm_record(rec: dict):
                     _to_float(inner.get("Weight_of_the_Baby")),
                     _to_str(inner.get("child_cried")),
                     _to_ts(inner.get("dob_child")),
-                    ", ".join(defects) if isinstance(defects, list) else _to_str(defects),
+                    ", ".join(defects) if isinstance(
+                        defects, list) else _to_str(defects),
                     _to_str(c.get("child_breast_fed")),
-                    ", ".join(immun) if isinstance(immun, list) else _to_str(immun),
+                    ", ".join(immun) if isinstance(
+                        immun, list) else _to_str(immun),
                 ))
 
         # ── Home visits ────────────────────────────────────────────────────
@@ -1019,7 +1024,8 @@ def _flatten_nhm_record(rec: dict):
                 continue
             hv_rows.append((
                 rid, pn, hvidx,
-                _to_ts(hv.get("hv_record_date") or hv.get("hv_record_date_default")),
+                _to_ts(hv.get("hv_record_date") or hv.get(
+                    "hv_record_date_default")),
                 _to_str(hv.get("home_visits_done_by_the_ANM_ASHA")),
                 _to_str(hv.get("ASHA_of_the_Village_active")),
             ))
@@ -1141,7 +1147,8 @@ def load_nhm_formdata(engine, jsonl_path: str | Path, skip_if_exists: bool = Fal
 
     def _flush():
         if raw_buf:
-            _copy_rows(cursor, "raw.nhm_records_raw", _NHM_RAW_COLS, raw_buf, jsonb_idx=6)
+            _copy_rows(cursor, "raw.nhm_records_raw",
+                       _NHM_RAW_COLS, raw_buf, jsonb_idx=6)
             totals["raw.nhm_records_raw"] += len(raw_buf)
             raw_buf.clear()
         if mother_buf:
@@ -1181,7 +1188,8 @@ def load_nhm_formdata(engine, jsonl_path: str | Path, skip_if_exists: bool = Fal
                 try:
                     rec = json.loads(line)
                 except json.JSONDecodeError as exc:
-                    logger.warning("line %d: bad JSON, skipping: %s", line_num, exc)
+                    logger.warning(
+                        "line %d: bad JSON, skipping: %s", line_num, exc)
                     skipped_records += 1
                     continue
 
@@ -1194,7 +1202,8 @@ def load_nhm_formdata(engine, jsonl_path: str | Path, skip_if_exists: bool = Fal
                     continue
                 seen_record_ids.add(rid)
 
-                raw, mother, pregs, ancs, children, hvs = _flatten_nhm_record(rec)
+                raw, mother, pregs, ancs, children, hvs = _flatten_nhm_record(
+                    rec)
                 raw_buf.append(raw)
                 mother_buf.append(mother)
 
@@ -1228,7 +1237,8 @@ def load_nhm_formdata(engine, jsonl_path: str | Path, skip_if_exists: bool = Fal
                 if len(raw_buf) >= BATCH_SIZE:
                     _flush()
                     elapsed = (datetime.now() - started).total_seconds()
-                    rate = totals["raw.nhm_records_raw"] / elapsed if elapsed > 0 else 0
+                    rate = totals["raw.nhm_records_raw"] / \
+                        elapsed if elapsed > 0 else 0
                     logger.info(
                         "  … %d records (%.0f rec/s) — pregs=%d ancs=%d "
                         "children=%d home_visits=%d",
