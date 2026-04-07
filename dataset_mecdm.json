@@ -1,8 +1,8 @@
 {
   "metadata": {
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "MECDM SuperApp Dataset Configuration",
-    "last_updated": "2026-03-30",
+    "last_updated": "2026-04-07",
     "maintainer": "Tattva Foundation"
   },
   "datasets": [
@@ -51,27 +51,22 @@
         },
         {
           "name": "health_data",
-          "description": "Core maternal and child health tracking data",
+          "description": "Aggregated village-level maternal and child health indicators (monthly).",
           "tables": [
-            "anc_visits",
             "village_indicators_monthly"
           ]
         },
         {
-          "name": "mother_app",
-          "description": "Curated Mother App dataset — registration, ANC visits 1–4, delivery outcomes, and per-child results. Replaces legacy mother_journeys + raw_pregnancy_records. mothers is one row per pregnancy; mother_anc_visits_flat and mother_children are long-form children joined via composite (mother_id, pregnancy_number) FK.",
+          "name": "nhm_mother",
+          "description": "Authoritative live mother/pregnancy/ANC/child dataset, sourced directly from the NHM Megh formdata API (form 5fa5510a4794b76e71267ebb) via nhm_api_download.py. nhm_records_raw holds the full JSONB payload as the source of truth; nhm_mothers/nhm_pregnancies/nhm_anc_visits/nhm_children/nhm_home_visits are normalized projections joined by record_id (+ pregnancy_num for the child tables). Use v_nhm_mothers_flat for ad-hoc wide-format queries that mirror the legacy 'mothers' table shape.",
           "tables": [
-            "mothers",
-            "mother_anc_visits_flat",
-            "mother_children"
-          ]
-        },
-        {
-          "name": "raw_records",
-          "description": "Unprocessed Meghealth API responses preserved for audit",
-          "tables": [
-            "raw_anc_records",
-            "raw_child_records"
+            "nhm_records_raw",
+            "nhm_mothers",
+            "nhm_pregnancies",
+            "nhm_anc_visits",
+            "nhm_children",
+            "nhm_home_visits",
+            "v_nhm_mothers_flat"
           ]
         },
         {
@@ -85,8 +80,7 @@
         }
       ],
       "stats_blocked_tables": [
-        "raw_anc_records",
-        "raw_child_records",
+        "nhm_records_raw",
         "geo_full_mapping",
         "geo_match_report",
         "meghealth_geo_mapping",
@@ -101,17 +95,19 @@
         "research_articles"
       ],
       "privacy_restricted_columns": [
-        "mother_id",
-        "pregnancy_number",
-        "mongo_id",
+        "record_id",
         "sangrah_id",
         "mcts_rch_id",
-        "mother_name",
         "name_woman",
         "name_husband",
-        "phone",
-        "address",
-        "gps_location"
+        "mobile_number",
+        "epic_id_of_woman",
+        "abha_id",
+        "abha_address",
+        "mhis_id",
+        "address_res",
+        "gps_location",
+        "photograph_of_visit"
       ]
     }
   ],

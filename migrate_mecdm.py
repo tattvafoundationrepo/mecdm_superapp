@@ -13,28 +13,31 @@ Tables created:
                 master_health_facilities, geo_full_mapping, geo_match_report
   Infrastructure: health_facilities, anganwadi_centres
   Geography   : meghealth_geo_mapping
-  Health data : anc_visits, village_indicators_monthly
-  Mother App  : mothers, mother_anc_visits_flat, mother_children
-                (curated Mother App dataset — replaces legacy mother_journeys
-                 and raw_pregnancy_records)
-  Raw records : raw_anc_records, raw_child_records
+  Health data : village_indicators_monthly
+  NHM mother  : raw.nhm_records_raw, nhm_mothers, nhm_pregnancies, nhm_anc_visits,
+                nhm_children, nhm_home_visits  + view v_nhm_mothers_flat
+                (sourced live from data.nhmmegh.in formdata API via
+                 nhm_api_download.py — replaces legacy mother_app + raw_json)
   Reference   : nfhs_indicators, video_library, research_articles
 
 Usage:
     python migrate_mecdm.py                        # full migration
-    python migrate_mecdm.py --skip-raw-json        # skip large raw JSON files (~961 MB)
     python migrate_mecdm.py --only geo             # geographic tables only
     python migrate_mecdm.py --only master          # master/reference tables only
     python migrate_mecdm.py --only infra           # infrastructure tables only
-    python migrate_mecdm.py --only health          # health CSV tables only
-    python migrate_mecdm.py --only mother_app      # Mother App flattened CSV → mothers/anc/children
-    python migrate_mecdm.py --only raw_json        # raw JSON tables only
+    python migrate_mecdm.py --only health          # village_indicators_monthly only
+    python migrate_mecdm.py --only nhm_mother      # NHM formdata → 6 tables + flat view
     python migrate_mecdm.py --only ref_json        # reference JSON tables only
     python migrate_mecdm.py --only schema          # PKs/FKs/indexes/comments only
-    python migrate_mecdm.py --drop                 # drop all 25 tables then run full migration
-    python migrate_mecdm.py --drop --only health   # drop only health-stage tables, then reload
+    python migrate_mecdm.py --drop                 # drop all tables then run full migration
+    python migrate_mecdm.py --drop --only nhm_mother  # rebuild NHM tables from JSONL
     python migrate_mecdm.py --truncate             # truncate all tables (keep schema) then reload
     python migrate_mecdm.py --truncate --only geo  # truncate only geographic tables
+
+Prerequisites for the nhm_mother stage:
+    1. Set NHM_API_KEY_ID and NHM_API_KEY in .env
+    2. Run `python nhm_api_download.py` to populate
+       mecdm_dataset/nhm_formdata.jsonl (~440k records, ~2.5 GB)
 
 Environment variables (see .env):
     ALLOYDB_POSTGRES_USER, ALLOYDB_POSTGRES_PASSWORD,
@@ -108,15 +111,14 @@ STAGE_TABLES: dict[str, list[str]] = {
         "anganwadi_centres", "health_facilities",
     ],
     "health": [
-        "anc_visits",
         "village_indicators_monthly",
     ],
-    "mother_app": [
-        # Children listed before parent for safe sequential DROP
-        "mother_children", "mother_anc_visits_flat", "mothers",
-    ],
-    "raw_json": [
-        "raw_anc_records", "raw_child_records",
+    "nhm_mother": [
+        # Children listed before parents for safe sequential DROP.
+        # raw.nhm_records_raw lives in the `raw` schema so PII / source-of-truth
+        # JSON is not exposed via the default public search_path.
+        "nhm_home_visits", "nhm_children", "nhm_anc_visits",
+        "nhm_pregnancies", "nhm_mothers", "raw.nhm_records_raw",
     ],
     "ref_json": [
         "nfhs_indicators", "video_library", "research_articles",
@@ -170,7 +172,12 @@ def get_psycopg2_conn():
 # ===========================================================================
 
 def table_exists(engine, table_name: str) -> bool:
-    return table_name in inspect(engine).get_table_names(schema="public")
+    """Accept either bare names (assumed `public`) or `schema.table`."""
+    if "." in table_name:
+        schema, name = table_name.split(".", 1)
+    else:
+        schema, name = "public", table_name
+    return name in inspect(engine).get_table_names(schema=schema)
 
 
 def get_row_count(engine, table_name: str) -> int:
@@ -191,9 +198,10 @@ def _drop_cascade(engine, table_name: str) -> None:
 
 
 def create_extensions(engine):
-    logger.info("Ensuring PostGIS extension is installed…")
+    logger.info("Ensuring PostGIS extension and 'raw' schema exist…")
     with engine.begin() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
+        conn.execute(text("CREATE SCHEMA IF NOT EXISTS raw;"))
 
 
 def _exec_sql(engine, statements: list[str], label: str):
@@ -607,21 +615,8 @@ def load_json_normalized(
 
 
 # ===========================================================================
-# Mother App loader — flattened_mothers.csv → 3 normalized tables
+# Generic chunk COPY helper (shared by NHM loader)
 # ===========================================================================
-
-# Per-visit and per-child field suffixes (the part after `ancN_` / `childN_`)
-_ANC_FIELDS = [
-    "date", "gestational_age_wks", "place", "weight_kg", "haemoglobin",
-    "bp_systolic", "bp_diastolic", "blood_sugar_fasting", "blood_sugar_pp",
-    "high_risk", "risk_factors", "danger_signs", "services",
-    "ifa_tablets", "urine_albumin", "urine_sugar",
-]
-_CHILD_FIELDS = [
-    "gender", "weight_kg", "cried_at_birth", "dob",
-    "defects", "breastfed", "immunization",
-]
-
 
 def _copy_chunk(cursor, table_name: str, df: pd.DataFrame, write_header: bool):
     """COPY a DataFrame into an existing table via psycopg2 copy_expert."""
@@ -644,201 +639,616 @@ def _copy_chunk(cursor, table_name: str, df: pd.DataFrame, write_header: bool):
         )
 
 
-def _split_flattened_chunk(chunk: pd.DataFrame):
-    """
-    Split one chunk of the flattened_mothers CSV into 3 DataFrames:
-    (mothers_wide, anc_long, children_long).
-    """
-    # mothers_wide: drop all anc{N}_* and child{N}_* columns
-    wide_cols = [
-        c for c in chunk.columns
-        if not (c.startswith(("anc1_", "anc2_", "anc3_", "anc4_",
-                              "child1_", "child2_", "child3_")))
-    ]
-    mothers_wide = chunk[wide_cols].copy()
+# ===========================================================================
+# NHM formdata loader — nhm_formdata.jsonl → 6 tables (1 raw + 5 normalized)
+# ===========================================================================
+#
+# Source : backend/mecdm_dataset/nhm_formdata.jsonl, produced by
+#          nhm_api_download.py from data.nhmmegh.in formdata API.
+#          One JSON document per line (~440k records).
+# Tables :
+#   raw.nhm_records_raw  — full JSONB document keyed by _id
+#   nhm_mothers      — 1 row per record _id (woman demographics)
+#   nhm_pregnancies  — 1 row per pregnancy_serial_number_grp[] entry
+#   nhm_anc_visits   — 1 row per ANC_visits_grp_N (N=1..5) when present
+#   nhm_children     — 1 row per delivery_grp.child_grp.child_rpt_grp[] entry
+#   nhm_home_visits  — 1 row per home_visit_grp.hv_group entry
+# View   : v_nhm_mothers_flat (created in apply_nhm_views)
 
-    key_cols = ["mother_id", "pregnancy_number"]
+NHM_TABLES = (
+    "raw.nhm_records_raw",
+    "nhm_mothers",
+    "nhm_pregnancies",
+    "nhm_anc_visits",
+    "nhm_children",
+    "nhm_home_visits",
+)
 
-    # ── ANC long form ──────────────────────────────────────────────────────
-    anc_frames = []
-    for n in range(1, 5):
-        prefix = f"anc{n}_"
-        src_cols = [
-            prefix + f for f in _ANC_FIELDS if (prefix + f) in chunk.columns]
-        if not src_cols:
-            continue
-        sub = chunk[key_cols + src_cols].copy()
-        sub.columns = key_cols + [c[len(prefix):] for c in src_cols]
-        sub.insert(2, "anc_visit_num", n)
-        # Skip rows with no recorded date (visit didn't happen)
-        sub = sub[sub["date"].notna()]
-        anc_frames.append(sub)
-    anc_long = (
-        pd.concat(anc_frames, ignore_index=True)
-        if anc_frames else pd.DataFrame(
-            columns=key_cols + ["anc_visit_num"] + _ANC_FIELDS
-        )
+# ── DDL ────────────────────────────────────────────────────────────────────
+NHM_DDL = [
+    """
+    CREATE TABLE raw.nhm_records_raw (
+        record_id    TEXT PRIMARY KEY,
+        form_id      TEXT,
+        created_at   TIMESTAMPTZ,
+        modified_at  TIMESTAMPTZ,
+        created_by   TEXT,
+        modified_by  TEXT,
+        fetched_at   TIMESTAMPTZ DEFAULT NOW(),
+        payload      JSONB NOT NULL
+    );
+    """,
+    """
+    CREATE TABLE nhm_mothers (
+        record_id            TEXT PRIMARY KEY,
+        sangrah_id           TEXT,
+        name_woman           TEXT,
+        year_of_birth        TIMESTAMPTZ,
+        age_mother           INTEGER,
+        age_calc             INTEGER,
+        education_woman      TEXT,
+        name_husband         TEXT,
+        education_husband    TEXT,
+        district_res         TEXT,
+        block_res            TEXT,
+        phc_res              TEXT,
+        sc_res               TEXT,
+        village_res          TEXT,
+        address_res          TEXT,
+        shg_member           TEXT,
+        epic_id_of_woman     TEXT,
+        mcts_rch_id          TEXT,
+        mobile_number        TEXT,
+        mobile_belongs_to    TEXT,
+        abha_id              TEXT,
+        abha_address         TEXT,
+        mhis_id              TEXT,
+        username             TEXT,
+        device_id            TEXT,
+        device_model         TEXT,
+        app_version          TEXT,
+        gps_location         TEXT,
+        instance_name        TEXT,
+        created_at           TIMESTAMPTZ,
+        modified_at          TIMESTAMPTZ
+    );
+    """,
+    """
+    CREATE TABLE nhm_pregnancies (
+        record_id                  TEXT NOT NULL,
+        pregnancy_num              INTEGER NOT NULL,
+        age_of_mother              INTEGER,
+        lmp                        TIMESTAMPTZ,
+        lmp_disp                   TEXT,
+        edd                        TIMESTAMPTZ,
+        edd_disp                   TEXT,
+        edd_num                    INTEGER,
+        details_current_pregnancy  TEXT[],
+        gravida                    INTEGER,
+        parity                     INTEGER,
+        abortion                   INTEGER,
+        deaths                     INTEGER,
+        living                     INTEGER,
+        total_adl                  INTEGER,
+        state                      TEXT,
+        district                   TEXT,
+        district_code_lgd          TEXT,
+        block                      TEXT,
+        phc                        TEXT,
+        subcentre_reg              TEXT,
+        anmhw                      TEXT,
+        medicalofficer             TEXT,
+        village                    TEXT,
+        blood_group                TEXT,
+        blood_group_negative       TEXT,
+        order_of_pregnancy_reg     TEXT,
+        registration_date          TIMESTAMPTZ,
+        photograph_of_visit        TEXT,
+        note_add                   TEXT,
+        PRIMARY KEY (record_id, pregnancy_num)
+    );
+    """,
+    """
+    CREATE TABLE nhm_anc_visits (
+        record_id            TEXT NOT NULL,
+        pregnancy_num        INTEGER NOT NULL,
+        anc_visit_num        SMALLINT NOT NULL,
+        visit_date           TIMESTAMPTZ,
+        weight_kg            DOUBLE PRECISION,
+        haemoglobin          DOUBLE PRECISION,
+        bp_systolic          DOUBLE PRECISION,
+        bp_diastolic         DOUBLE PRECISION,
+        blood_sugar_fasting  DOUBLE PRECISION,
+        blood_sugar_pp       DOUBLE PRECISION,
+        tt_given_earlier     TEXT,
+        tt_services          TEXT,
+        services             TEXT[],
+        danger_signs         TEXT[],
+        risk_factors         TEXT[],
+        referred_or_treated  TEXT[],
+        usg_indications      TEXT[],
+        PRIMARY KEY (record_id, pregnancy_num, anc_visit_num)
+    );
+    """,
+    """
+    CREATE TABLE nhm_children (
+        record_id        TEXT NOT NULL,
+        pregnancy_num    INTEGER NOT NULL,
+        child_num        SMALLINT NOT NULL,
+        gender           TEXT,
+        weight_kg        DOUBLE PRECISION,
+        cried_at_birth   TEXT,
+        dob              TIMESTAMPTZ,
+        defects          TEXT,
+        breastfed        TEXT,
+        immunization     TEXT,
+        PRIMARY KEY (record_id, pregnancy_num, child_num)
+    );
+    """,
+    """
+    CREATE TABLE nhm_home_visits (
+        record_id        TEXT NOT NULL,
+        pregnancy_num    INTEGER NOT NULL,
+        seq              SMALLINT NOT NULL,
+        record_date      TIMESTAMPTZ,
+        done_by          TEXT,
+        asha_active      TEXT,
+        PRIMARY KEY (record_id, pregnancy_num, seq)
+    );
+    """,
+]
+
+
+def _to_int(v):
+    try:
+        if v is None or v == "":
+            return None
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_float(v):
+    try:
+        if v is None or v == "":
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_str(v):
+    if v is None:
+        return None
+    if isinstance(v, (dict, list)):
+        return json.dumps(v, ensure_ascii=False)
+    return str(v)
+
+
+def _to_ts(v):
+    """
+    Pass through ISO timestamp strings; let postgres parse. Empty → None.
+    Rejects non-date values like '0', 'N/A', or bare integers — the NHM API
+    sometimes leaves these in date fields when the user skipped the question.
+    """
+    if v is None or v == "":
+        return None
+    s = str(v).strip()
+    # Heuristic: a real ISO date contains a hyphen between digits (YYYY-MM-DD).
+    # Anything else (e.g. "0", "Yes", "1") is treated as missing.
+    if "-" not in s:
+        return None
+    return s
+
+
+def _to_str_array(v):
+    """Coerce a value into a list[str] suitable for psycopg2 TEXT[] adaptation."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, list):
+        return [str(x) for x in v if x is not None and x != ""]
+    return [str(v)]
+
+
+def _flatten_nhm_record(rec: dict):
+    """
+    Convert one API record into rows for the 6 NHM tables.
+
+    Returns: (raw_row, mother_row, [preg_rows], [anc_rows], [child_rows], [hv_rows])
+    Each row is a tuple in column order matching the corresponding CREATE TABLE.
+    """
+    rid = rec.get("_id")
+    src = rec.get("source") or {}
+    abha = src.get("ABHA_MHIS_id") or {}
+
+    # ── raw.nhm_records_raw ────────────────────────────────────────────────────
+    raw_row = (
+        rid,
+        rec.get("formId"),
+        _to_ts(rec.get("createdAt")),
+        _to_ts(rec.get("modifiedAt")),
+        rec.get("createdBy"),
+        rec.get("modifiedBy"),
+        json.dumps(rec, ensure_ascii=False),  # JSONB payload (psycopg2 → ::jsonb)
     )
 
-    # ── Children long form ─────────────────────────────────────────────────
-    child_frames = []
-    for n in range(1, 4):
-        prefix = f"child{n}_"
-        src_cols = [
-            prefix + f for f in _CHILD_FIELDS if (prefix + f) in chunk.columns]
-        if not src_cols:
-            continue
-        sub = chunk[key_cols + src_cols].copy()
-        sub.columns = key_cols + [c[len(prefix):] for c in src_cols]
-        sub.insert(2, "child_num", n)
-        # Skip rows where every child field is null
-        data_cols = [
-            c for c in sub.columns if c not in key_cols + ["child_num"]]
-        sub = sub.dropna(how="all", subset=data_cols)
-        child_frames.append(sub)
-    children_long = (
-        pd.concat(child_frames, ignore_index=True)
-        if child_frames else pd.DataFrame(
-            columns=key_cols + ["child_num"] + _CHILD_FIELDS
-        )
+    # ── nhm_mothers ────────────────────────────────────────────────────────
+    mother_row = (
+        rid,
+        _to_str(src.get("sangrah_id")),
+        _to_str(src.get("name_woman")),
+        _to_ts(src.get("year_of_birth")),
+        _to_int(src.get("age_mother")),
+        _to_int(src.get("age_calc")),
+        _to_str(src.get("education_woman")),
+        _to_str(src.get("name_husband")),
+        _to_str(src.get("education_husband")),
+        _to_str(src.get("district_res")),
+        _to_str(src.get("block_res")),
+        _to_str(src.get("phc_res")),
+        _to_str(src.get("sc_res")),
+        _to_str(src.get("village_res")),
+        _to_str(src.get("address_res")),
+        _to_str(src.get("shg_member")),
+        _to_str(src.get("epic_id_of_woman")),
+        _to_str(src.get("MCTS_RCH_ID") or src.get("MCTS_RCH_id")),
+        _to_str(src.get("mobile_number_of_woman")),
+        _to_str(src.get("mobile_number_belongs_to")),
+        _to_str(abha.get("abha_id")),
+        _to_str(abha.get("abha_address")),
+        _to_str(abha.get("mhis_id")),
+        _to_str(src.get("Username")),
+        _to_str(src.get("Deviceid")),
+        _to_str(src.get("Devicemodel")),
+        _to_str(src.get("AppVersion")),
+        _to_str(src.get("Location")),
+        _to_str(src.get("InstanceName")),
+        _to_ts(rec.get("createdAt")),
+        _to_ts(rec.get("modifiedAt")),
     )
 
-    return mothers_wide, anc_long, children_long
+    preg_rows: list = []
+    anc_rows: list = []
+    child_rows: list = []
+    hv_rows: list = []
+
+    pregs = src.get("pregnancy_serial_number_grp") or []
+    if not isinstance(pregs, list):
+        pregs = []
+
+    for idx, p in enumerate(pregs, start=1):
+        if not isinstance(p, dict):
+            continue
+        # Pregnancy ordinal — prefer pregnancy_serial_number_calc, fall back to idx
+        pn = _to_int(p.get("pregnancy_serial_number_calc")) or idx
+
+        gpadl = ((p.get("past_obstetric_history") or {}).get("GPADL")) or {}
+        reg = p.get("reg_location_grp") or {}
+
+        preg_rows.append((
+            rid, pn,
+            _to_int(p.get("age_of_mother")),
+            _to_ts(p.get("LMP")),
+            _to_str(p.get("LMP_disp")),
+            _to_ts(p.get("EDD")),
+            _to_str(p.get("EDD_disp")),
+            _to_int(p.get("EDD_num")),
+            _to_str_array(p.get("details_current_pregnancy")),
+            _to_int(gpadl.get("gravida")),
+            _to_int(gpadl.get("parity_calculate")),
+            _to_int(gpadl.get("abortion")),
+            _to_int(gpadl.get("deaths")),
+            _to_int(gpadl.get("living")),
+            _to_int(gpadl.get("total_ADL")),
+            _to_str(reg.get("state")),
+            _to_str(reg.get("district")),
+            _to_str(reg.get("district_code_lgd")),
+            _to_str(reg.get("block")),
+            _to_str(reg.get("phc")),
+            _to_str(reg.get("subcentre_reg")),
+            _to_str(reg.get("anmhw")),
+            _to_str(reg.get("medicalofficer")),
+            _to_str(reg.get("village")),
+            _to_str(reg.get("blood_group")),
+            _to_str(reg.get("blood_group_negative")),
+            _to_str(reg.get("Order_of_Pregnancy_Reg")),
+            _to_ts(reg.get("registration_date")),
+            _to_str(reg.get("Photograph_of_the_Visit")),
+            _to_str(p.get("note_add")),
+        ))
+
+        # ── ANC visits 1..5 ────────────────────────────────────────────────
+        anc_grp = (p.get("ANC_visits_grp") or {})
+        for n in range(1, 6):
+            v = anc_grp.get(f"ANC_visits_grp_{n}")
+            if not isinstance(v, dict) or not v:
+                continue
+            basic = v.get(f"ANC_basic_parameter_grp_{n}") or {}
+            usg = (((v.get(f"usg_grp_anc_{n}") or {}).get(f"usg_details_grp_anc_{n}")) or {})
+            anc_rows.append((
+                rid, pn, n,
+                _to_ts(v.get(f"date_of_ANC_{n}") or v.get(f"anc{n}_timestamp")),
+                _to_float(basic.get(f"weight_in_Kgs_{n}")),
+                _to_float(basic.get(f"haemoglobin_in_grams_{n}")),
+                _to_float(basic.get(f"upper_systolic_pressure_{n}")),
+                _to_float(basic.get(f"lower_diastolic_pressure_{n}")),
+                _to_float(basic.get(f"blood_sugar_fasting_{n}")),
+                _to_float(basic.get(f"blood_sugar_pp_{n}")),
+                _to_str(v.get(f"ANC_TT_given_earlier_{n}")),
+                _to_str(v.get(f"ANC_TT_services_{n}")),
+                _to_str_array(v.get(f"ANC_services_{n}")),
+                _to_str_array(v.get(f"anc_danger_signs_observed_{n}")),
+                _to_str_array(v.get(f"risk_factors_identified_{n}")),
+                _to_str_array(v.get(f"referrred_or_treated_{n}")),
+                _to_str_array(usg.get(f"usg_details_indications_anc_{n}")),
+            ))
+
+        # ── Children ───────────────────────────────────────────────────────
+        delivery = p.get("delivery_grp") or {}
+        child_grp = delivery.get("child_grp") or {}
+        children_arr = child_grp.get("child_rpt_grp") or []
+        if isinstance(children_arr, list):
+            for cidx, c in enumerate(children_arr, start=1):
+                if not isinstance(c, dict):
+                    continue
+                inner = c.get("child_each_grp") or {}
+                cn = _to_int(c.get("child_no")) or cidx
+                defects = c.get("child_defects")
+                immun = c.get("immunization_doses_del")
+                child_rows.append((
+                    rid, pn, cn,
+                    _to_str(inner.get("Baby_Gender")),
+                    _to_float(inner.get("Weight_of_the_Baby")),
+                    _to_str(inner.get("child_cried")),
+                    _to_ts(inner.get("dob_child")),
+                    ", ".join(defects) if isinstance(defects, list) else _to_str(defects),
+                    _to_str(c.get("child_breast_fed")),
+                    ", ".join(immun) if isinstance(immun, list) else _to_str(immun),
+                ))
+
+        # ── Home visits ────────────────────────────────────────────────────
+        hv_grp = p.get("home_visit_grp") or {}
+        hv_inner = hv_grp.get("hv_group")
+        # hv_group can be a single dict or a list of dicts depending on count
+        hv_list = hv_inner if isinstance(hv_inner, list) else (
+            [hv_inner] if isinstance(hv_inner, dict) else [])
+        for hvidx, hv in enumerate(hv_list, start=1):
+            if not isinstance(hv, dict):
+                continue
+            hv_rows.append((
+                rid, pn, hvidx,
+                _to_ts(hv.get("hv_record_date") or hv.get("hv_record_date_default")),
+                _to_str(hv.get("home_visits_done_by_the_ANM_ASHA")),
+                _to_str(hv.get("ASHA_of_the_Village_active")),
+            ))
+
+    return raw_row, mother_row, preg_rows, anc_rows, child_rows, hv_rows
 
 
-def load_flattened_mothers(
-    engine,
-    filepath: str | Path,
-    skip_if_exists: bool = False,
-):
+def _copy_rows(cursor, table: str, columns: tuple, rows: list, jsonb_idx=None):
     """
-    Load the curated Mother App `flattened_mothers.csv` into 3 normalized tables:
-      mothers                 — one row per pregnancy (wide)
-      mother_anc_visits_flat  — long form of anc1..anc4 blocks
-      mother_children         — long form of child1..child3 blocks
-
-    Streams the CSV in chunks to keep memory bounded; uses psycopg2 COPY for
-    high-throughput bulk insert (mirrors load_csv_large).
+    Bulk-insert via psycopg2 execute_values for type-safe array/jsonb handling.
+    `jsonb_idx` is the column index (within `columns`) that should be cast to JSONB.
     """
-    filepath = Path(filepath)
-    if not filepath.exists():
-        logger.warning(f"File not found, skipping mother_app: {filepath}")
+    if not rows:
+        return
+    cols_sql = ", ".join(columns)
+    if jsonb_idx is not None:
+        # Build a per-column template that casts the JSONB column
+        parts = []
+        for i in range(len(columns)):
+            parts.append("%s::jsonb" if i == jsonb_idx else "%s")
+        template = "(" + ",".join(parts) + ")"
+    else:
+        template = None
+    psycopg2.extras.execute_values(
+        cursor,
+        f"INSERT INTO {table} ({cols_sql}) VALUES %s",
+        rows,
+        template=template,
+        page_size=1000,
+    )
+
+
+# Column tuples in the same order as the DDL above
+_NHM_RAW_COLS = (
+    "record_id", "form_id", "created_at", "modified_at",
+    "created_by", "modified_by", "payload",
+)
+_NHM_MOTHER_COLS = (
+    "record_id", "sangrah_id", "name_woman", "year_of_birth", "age_mother",
+    "age_calc", "education_woman", "name_husband", "education_husband",
+    "district_res", "block_res", "phc_res", "sc_res", "village_res",
+    "address_res", "shg_member", "epic_id_of_woman", "mcts_rch_id",
+    "mobile_number", "mobile_belongs_to", "abha_id", "abha_address", "mhis_id",
+    "username", "device_id", "device_model", "app_version", "gps_location",
+    "instance_name", "created_at", "modified_at",
+)
+_NHM_PREG_COLS = (
+    "record_id", "pregnancy_num", "age_of_mother", "lmp", "lmp_disp",
+    "edd", "edd_disp", "edd_num", "details_current_pregnancy",
+    "gravida", "parity", "abortion", "deaths", "living", "total_adl",
+    "state", "district", "district_code_lgd", "block", "phc", "subcentre_reg",
+    "anmhw", "medicalofficer", "village", "blood_group", "blood_group_negative",
+    "order_of_pregnancy_reg", "registration_date", "photograph_of_visit", "note_add",
+)
+_NHM_ANC_COLS = (
+    "record_id", "pregnancy_num", "anc_visit_num", "visit_date",
+    "weight_kg", "haemoglobin", "bp_systolic", "bp_diastolic",
+    "blood_sugar_fasting", "blood_sugar_pp",
+    "tt_given_earlier", "tt_services", "services", "danger_signs",
+    "risk_factors", "referred_or_treated", "usg_indications",
+)
+_NHM_CHILD_COLS = (
+    "record_id", "pregnancy_num", "child_num", "gender", "weight_kg",
+    "cried_at_birth", "dob", "defects", "breastfed", "immunization",
+)
+_NHM_HV_COLS = (
+    "record_id", "pregnancy_num", "seq", "record_date", "done_by", "asha_active",
+)
+
+
+def load_nhm_formdata(engine, jsonl_path: str | Path, skip_if_exists: bool = False):
+    """
+    Stream nhm_formdata.jsonl → 6 tables (1 raw + 5 normalized).
+
+    Drops & recreates the 6 tables, streams the JSONL in BATCH_SIZE chunks,
+    flattens each record via _flatten_nhm_record, and bulk-inserts via
+    psycopg2.extras.execute_values for native array/JSONB handling.
+    """
+    jsonl_path = Path(jsonl_path)
+    if not jsonl_path.exists():
+        logger.warning(
+            "File not found, skipping nhm_mother: %s "
+            "(run `python nhm_api_download.py` first)",
+            jsonl_path,
+        )
         return
 
-    targets = ("mothers", "mother_anc_visits_flat", "mother_children")
-    if skip_if_exists and all(table_exists(engine, t) for t in targets):
-        if all(get_row_count(engine, t) > 0 for t in targets):
-            logger.info("Skipping mother_app — all 3 tables already populated")
+    if skip_if_exists and all(table_exists(engine, t) for t in NHM_TABLES):
+        if all(get_row_count(engine, t) > 0 for t in NHM_TABLES):
+            logger.info("Skipping nhm_mother — all 6 tables already populated")
             return
 
-    size_mb = filepath.stat().st_size / 1024 / 1024
+    size_mb = jsonl_path.stat().st_size / 1024 / 1024
     logger.info(
-        f"Loading {filepath.name} → mothers / mother_anc_visits_flat / "
-        f"mother_children ({size_mb:.0f} MB, COPY protocol)…"
+        "Loading %s → 6 NHM tables (%.0f MB JSONL)…",
+        jsonl_path.name, size_mb,
     )
 
-    # Drop downstream tables before parents (FK-safe even without CASCADE)
-    for tbl in ("mother_children", "mother_anc_visits_flat", "mothers"):
+    # Drop in FK-safe order (children before parents — though we have no FKs
+    # at this point because they are added in apply_foreign_keys)
+    for tbl in NHM_TABLES[::-1]:
         _drop_cascade(engine, tbl)
+    for ddl in NHM_DDL:
+        with engine.begin() as conn:
+            conn.execute(text(ddl))
 
-    reader = pd.read_csv(
-        filepath,
-        chunksize=CHUNKSIZE,
-        low_memory=False,
-        dtype=str,
-        keep_default_na=True,
-        na_values=["", "NA", "N/A", "null", "NULL", "None"],
-    )
-
-    tables_created = False
-    totals = {"mothers": 0, "mother_anc_visits_flat": 0, "mother_children": 0}
-    start_time = datetime.now()
+    totals = {t: 0 for t in NHM_TABLES}
+    skipped_records = 0
+    started = datetime.now()
     raw_conn = get_psycopg2_conn()
     cursor = raw_conn.cursor()
 
+    raw_buf: list = []
+    mother_buf: list = []
+    preg_buf: list = []
+    anc_buf: list = []
+    child_buf: list = []
+    hv_buf: list = []
+
+    def _flush():
+        if raw_buf:
+            _copy_rows(cursor, "raw.nhm_records_raw", _NHM_RAW_COLS, raw_buf, jsonb_idx=6)
+            totals["raw.nhm_records_raw"] += len(raw_buf)
+            raw_buf.clear()
+        if mother_buf:
+            _copy_rows(cursor, "nhm_mothers", _NHM_MOTHER_COLS, mother_buf)
+            totals["nhm_mothers"] += len(mother_buf)
+            mother_buf.clear()
+        if preg_buf:
+            _copy_rows(cursor, "nhm_pregnancies", _NHM_PREG_COLS, preg_buf)
+            totals["nhm_pregnancies"] += len(preg_buf)
+            preg_buf.clear()
+        if anc_buf:
+            _copy_rows(cursor, "nhm_anc_visits", _NHM_ANC_COLS, anc_buf)
+            totals["nhm_anc_visits"] += len(anc_buf)
+            anc_buf.clear()
+        if child_buf:
+            _copy_rows(cursor, "nhm_children", _NHM_CHILD_COLS, child_buf)
+            totals["nhm_children"] += len(child_buf)
+            child_buf.clear()
+        if hv_buf:
+            _copy_rows(cursor, "nhm_home_visits", _NHM_HV_COLS, hv_buf)
+            totals["nhm_home_visits"] += len(hv_buf)
+            hv_buf.clear()
+        raw_conn.commit()
+
     try:
-        for chunk_num, chunk in enumerate(reader):
-            mothers_wide, anc_long, children_long = _split_flattened_chunk(
-                chunk)
+        seen_record_ids: set = set()
+        seen_preg_keys: set = set()
+        seen_anc_keys: set = set()
+        seen_child_keys: set = set()
+        seen_hv_keys: set = set()
 
-            if not tables_created:
-                # Create empty DDL for all 3 tables from the first chunk's columns
-                mothers_wide.head(0).to_sql(
-                    "mothers", engine, if_exists="replace", index=False)
-                anc_long.head(0).to_sql(
-                    "mother_anc_visits_flat", engine,
-                    if_exists="replace", index=False)
-                children_long.head(0).to_sql(
-                    "mother_children", engine,
-                    if_exists="replace", index=False)
-                tables_created = True
+        with jsonl_path.open("r", encoding="utf-8") as f:
+            for line_num, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    logger.warning("line %d: bad JSON, skipping: %s", line_num, exc)
+                    skipped_records += 1
+                    continue
 
-            write_header = (chunk_num == 0)
-            _copy_chunk(cursor, "mothers", mothers_wide, write_header)
-            _copy_chunk(cursor, "mother_anc_visits_flat",
-                        anc_long, write_header)
-            _copy_chunk(cursor, "mother_children", children_long, write_header)
+                rid = rec.get("_id")
+                if not rid:
+                    skipped_records += 1
+                    continue
+                if rid in seen_record_ids:
+                    skipped_records += 1
+                    continue
+                seen_record_ids.add(rid)
 
-            totals["mothers"] += len(mothers_wide)
-            totals["mother_anc_visits_flat"] += len(anc_long)
-            totals["mother_children"] += len(children_long)
+                raw, mother, pregs, ancs, children, hvs = _flatten_nhm_record(rec)
+                raw_buf.append(raw)
+                mother_buf.append(mother)
 
-            if totals["mothers"] % 50_000 == 0:
-                elapsed = (datetime.now() - start_time).total_seconds()
-                rate = totals["mothers"] / elapsed if elapsed > 0 else 0
-                logger.info(
-                    f"  … {totals['mothers']:,} mothers "
-                    f"({rate:,.0f} rows/s) — "
-                    f"anc={totals['mother_anc_visits_flat']:,} "
-                    f"children={totals['mother_children']:,}"
-                )
-                raw_conn.commit()
+                # Dedup composite-key children rows defensively (some pregnancies
+                # repeat the same serial; keep the first occurrence per record).
+                for row in pregs:
+                    k = (row[0], row[1])
+                    if k in seen_preg_keys:
+                        continue
+                    seen_preg_keys.add(k)
+                    preg_buf.append(row)
+                for row in ancs:
+                    k = (row[0], row[1], row[2])
+                    if k in seen_anc_keys:
+                        continue
+                    seen_anc_keys.add(k)
+                    anc_buf.append(row)
+                for row in children:
+                    k = (row[0], row[1], row[2])
+                    if k in seen_child_keys:
+                        continue
+                    seen_child_keys.add(k)
+                    child_buf.append(row)
+                for row in hvs:
+                    k = (row[0], row[1], row[2])
+                    if k in seen_hv_keys:
+                        continue
+                    seen_hv_keys.add(k)
+                    hv_buf.append(row)
 
-        raw_conn.commit()
-        elapsed = (datetime.now() - start_time).total_seconds()
+                if len(raw_buf) >= BATCH_SIZE:
+                    _flush()
+                    elapsed = (datetime.now() - started).total_seconds()
+                    rate = totals["raw.nhm_records_raw"] / elapsed if elapsed > 0 else 0
+                    logger.info(
+                        "  … %d records (%.0f rec/s) — pregs=%d ancs=%d "
+                        "children=%d home_visits=%d",
+                        totals["raw.nhm_records_raw"], rate,
+                        totals["nhm_pregnancies"], totals["nhm_anc_visits"],
+                        totals["nhm_children"], totals["nhm_home_visits"],
+                    )
+
+        _flush()
+        elapsed = (datetime.now() - started).total_seconds()
         logger.info(
-            f"  ✓ mothers: {totals['mothers']:,} | "
-            f"mother_anc_visits_flat: {totals['mother_anc_visits_flat']:,} | "
-            f"mother_children: {totals['mother_children']:,} "
-            f"in {elapsed:.1f}s"
+            "  ✓ NHM loaded in %.1fs: raw=%d mothers=%d pregs=%d "
+            "ancs=%d children=%d home_visits=%d (skipped=%d)",
+            elapsed,
+            totals["raw.nhm_records_raw"], totals["nhm_mothers"],
+            totals["nhm_pregnancies"], totals["nhm_anc_visits"],
+            totals["nhm_children"], totals["nhm_home_visits"],
+            skipped_records,
         )
-
-        # ── Deduplicate by natural key ─────────────────────────────────────
-        # Source CSV has ~64 duplicate (mother_id, pregnancy_number) pairs.
-        # Keep the last physical occurrence (highest ctid) so the unique
-        # constraint + FKs added in apply_primary_keys/apply_foreign_keys
-        # succeed. Same approach for the long tables.
-        dedup_stmts = [
-            ("mothers", """
-                DELETE FROM mothers a USING mothers b
-                WHERE a.ctid < b.ctid
-                  AND a.mother_id        = b.mother_id
-                  AND a.pregnancy_number = b.pregnancy_number;
-            """),
-            ("mother_anc_visits_flat", """
-                DELETE FROM mother_anc_visits_flat a USING mother_anc_visits_flat b
-                WHERE a.ctid < b.ctid
-                  AND a.mother_id        = b.mother_id
-                  AND a.pregnancy_number = b.pregnancy_number
-                  AND a.anc_visit_num    = b.anc_visit_num;
-            """),
-            ("mother_children", """
-                DELETE FROM mother_children a USING mother_children b
-                WHERE a.ctid < b.ctid
-                  AND a.mother_id        = b.mother_id
-                  AND a.pregnancy_number = b.pregnancy_number
-                  AND a.child_num        = b.child_num;
-            """),
-        ]
-        for tbl, sql in dedup_stmts:
-            cursor.execute(sql)
-            if cursor.rowcount:
-                logger.info(
-                    f"  dedup {tbl}: removed {cursor.rowcount:,} duplicate row(s)")
-        raw_conn.commit()
     except Exception as exc:
         raw_conn.rollback()
-        logger.error(f"Failed mother_app load: {exc}")
+        logger.error("Failed nhm_mother load: %s", exc)
         raise
     finally:
         cursor.close()
@@ -896,21 +1306,8 @@ def apply_primary_keys(engine):
         "ALTER TABLE master_blocks ADD PRIMARY KEY (block_code_lgd);",
         "ALTER TABLE master_villages ADD PRIMARY KEY (village_id);",
         "ALTER TABLE master_health_facilities ADD PRIMARY KEY (facility_id);",
-        # Core health data
-        "ALTER TABLE anc_visits ADD PRIMARY KEY (anc_id);",
-        # Raw records — surrogate serial key (natural keys may have duplicates/nulls)
-        "ALTER TABLE raw_anc_records ADD COLUMN row_id SERIAL PRIMARY KEY;",
-        "ALTER TABLE raw_child_records ADD COLUMN row_id SERIAL PRIMARY KEY;",
-        # Mother App curated dataset
-        # mothers: surrogate PK + UNIQUE on (mother_id, pregnancy_number).
-        # The composite serves as the FK target for the long-form child tables.
-        "ALTER TABLE mothers ADD COLUMN row_id SERIAL PRIMARY KEY;",
-        "ALTER TABLE mothers ADD CONSTRAINT uq_mothers_mid_preg "
-        "UNIQUE (mother_id, pregnancy_number);",
-        "ALTER TABLE mother_anc_visits_flat ADD CONSTRAINT pk_manc "
-        "PRIMARY KEY (mother_id, pregnancy_number, anc_visit_num);",
-        "ALTER TABLE mother_children ADD CONSTRAINT pk_mchildren "
-        "PRIMARY KEY (mother_id, pregnancy_number, child_num);",
+        # NHM mother tables: PKs are already declared inline in NHM_DDL
+        # (record_id PK on raw/mothers; composite PKs on pregnancies/anc/children/home_visits).
         # Reference JSON
         "ALTER TABLE video_library ADD PRIMARY KEY (id);",
         "ALTER TABLE research_articles ADD PRIMARY KEY (id);",
@@ -1037,21 +1434,43 @@ def apply_foreign_keys(engine):
         # blocks & district_boundaries have no LGD codes — join by district name only
         # (no DB-level FK possible; use logical joins in application layer)
 
-        # ── Mother App curated dataset FKs ─────────────────────────────────────
-        # mother_anc_visits_flat → mothers (composite key)
+        # ── NHM mother dataset FKs ─────────────────────────────────────────────
+        # nhm_pregnancies → nhm_mothers
         """
-        ALTER TABLE mother_anc_visits_flat
-          ADD CONSTRAINT fk_manc_mothers
-          FOREIGN KEY (mother_id, pregnancy_number)
-          REFERENCES mothers(mother_id, pregnancy_number)
+        ALTER TABLE nhm_pregnancies
+          ADD CONSTRAINT fk_nhm_preg_mothers
+          FOREIGN KEY (record_id) REFERENCES nhm_mothers(record_id)
           ON DELETE CASCADE;
         """,
-        # mother_children → mothers (composite key)
+        # nhm_anc_visits → nhm_pregnancies (composite)
         """
-        ALTER TABLE mother_children
-          ADD CONSTRAINT fk_mchildren_mothers
-          FOREIGN KEY (mother_id, pregnancy_number)
-          REFERENCES mothers(mother_id, pregnancy_number)
+        ALTER TABLE nhm_anc_visits
+          ADD CONSTRAINT fk_nhm_anc_preg
+          FOREIGN KEY (record_id, pregnancy_num)
+          REFERENCES nhm_pregnancies(record_id, pregnancy_num)
+          ON DELETE CASCADE;
+        """,
+        # nhm_children → nhm_pregnancies (composite)
+        """
+        ALTER TABLE nhm_children
+          ADD CONSTRAINT fk_nhm_children_preg
+          FOREIGN KEY (record_id, pregnancy_num)
+          REFERENCES nhm_pregnancies(record_id, pregnancy_num)
+          ON DELETE CASCADE;
+        """,
+        # nhm_home_visits → nhm_pregnancies (composite)
+        """
+        ALTER TABLE nhm_home_visits
+          ADD CONSTRAINT fk_nhm_hv_preg
+          FOREIGN KEY (record_id, pregnancy_num)
+          REFERENCES nhm_pregnancies(record_id, pregnancy_num)
+          ON DELETE CASCADE;
+        """,
+        # raw.nhm_records_raw → nhm_mothers (1:1 source-of-truth pairing)
+        """
+        ALTER TABLE raw.nhm_records_raw
+          ADD CONSTRAINT fk_nhm_raw_mothers
+          FOREIGN KEY (record_id) REFERENCES nhm_mothers(record_id)
           ON DELETE CASCADE;
         """,
     ]
@@ -1078,22 +1497,24 @@ def apply_indexes(engine):
         "CREATE INDEX IF NOT EXISTS idx_health_fac_geom      ON health_facilities USING GIST (geom);",
         "CREATE INDEX IF NOT EXISTS idx_anganwadi_geom       ON anganwadi_centres USING GIST (geom);",
 
-        # --- Mother App curated dataset (mothers + long-form children) ---
-        # mother_id alone is non-unique (multiple pregnancies per mother).
-        "CREATE INDEX IF NOT EXISTS idx_mothers_mother_id        ON mothers (mother_id);",
-        "CREATE INDEX IF NOT EXISTS idx_mothers_district_block   ON mothers (district, block);",
-        "CREATE INDEX IF NOT EXISTS idx_mothers_reg_date         ON mothers (registration_date);",
-        "CREATE INDEX IF NOT EXISTS idx_mothers_delivery_date    ON mothers (delivery_date);",
-        "CREATE INDEX IF NOT EXISTS idx_mothers_lgd_district     ON mothers (lgd_district_code);",
-        "CREATE INDEX IF NOT EXISTS idx_manc_mother_id           ON mother_anc_visits_flat (mother_id);",
-        "CREATE INDEX IF NOT EXISTS idx_manc_visit_date          ON mother_anc_visits_flat (date);",
-        "CREATE INDEX IF NOT EXISTS idx_mchildren_mother_id      ON mother_children (mother_id);",
-        "CREATE INDEX IF NOT EXISTS idx_mchildren_dob            ON mother_children (dob);",
-
-        # --- ANC visits ---
-        "CREATE INDEX IF NOT EXISTS idx_anc_mother_id         ON anc_visits (mother_id);",
-        "CREATE INDEX IF NOT EXISTS idx_anc_visit_date        ON anc_visits (visit_date);",
-        "CREATE INDEX IF NOT EXISTS idx_anc_district_block    ON anc_visits (district, block);",
+        # --- NHM mother dataset (live API) ---
+        "CREATE INDEX IF NOT EXISTS idx_nhm_mothers_district     ON nhm_mothers (district_res);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_mothers_block        ON nhm_mothers (block_res);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_mothers_sangrah      ON nhm_mothers (sangrah_id);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_mothers_modified     ON nhm_mothers (modified_at);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_preg_lmp             ON nhm_pregnancies (lmp);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_preg_edd             ON nhm_pregnancies (edd);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_preg_district        ON nhm_pregnancies (district);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_preg_block           ON nhm_pregnancies (block);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_preg_district_lgd    ON nhm_pregnancies (district_code_lgd);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_preg_reg_date        ON nhm_pregnancies (registration_date);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_anc_visit_date       ON nhm_anc_visits (visit_date);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_anc_record           ON nhm_anc_visits (record_id);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_children_dob         ON nhm_children (dob);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_children_record      ON nhm_children (record_id);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_hv_record_date       ON nhm_home_visits (record_date);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_raw_payload          ON raw.nhm_records_raw USING GIN (payload);",
+        "CREATE INDEX IF NOT EXISTS idx_nhm_raw_modified         ON raw.nhm_records_raw (modified_at);",
 
         # --- Village indicators ---
         "CREATE INDEX IF NOT EXISTS idx_village_ind_dist_block ON village_indicators_monthly (district_code_lgd, block_code_lgd);",
@@ -1121,29 +1542,6 @@ def apply_indexes(engine):
         "CREATE INDEX IF NOT EXISTS idx_master_hf_block_code    ON master_health_facilities (block_code_lgd);",
         "CREATE INDEX IF NOT EXISTS idx_full_map_dist_block     ON geo_full_mapping (district_code_lgd, block_code_lgd);",
 
-        # --- Raw records — extracted FK columns ---
-        # mother_id is always present; pregnancy_id may be absent in ANC/child
-        # records (raw JSON did not include it) so guard with a column check.
-        "CREATE INDEX IF NOT EXISTS idx_raw_anc_mother_id   ON raw_anc_records (mother_id);",
-        """
-        DO $$ BEGIN
-          IF EXISTS (SELECT 1 FROM information_schema.columns
-                     WHERE table_schema='public' AND table_name='raw_anc_records'
-                       AND column_name='pregnancy_id') THEN
-            CREATE INDEX IF NOT EXISTS idx_raw_anc_pregnancy_id ON raw_anc_records (pregnancy_id);
-          END IF;
-        END $$;
-        """,
-        "CREATE INDEX IF NOT EXISTS idx_raw_child_mother_id  ON raw_child_records (mother_id);",
-        """
-        DO $$ BEGIN
-          IF EXISTS (SELECT 1 FROM information_schema.columns
-                     WHERE table_schema='public' AND table_name='raw_child_records'
-                       AND column_name='pregnancy_id') THEN
-            CREATE INDEX IF NOT EXISTS idx_raw_child_pregnancy_id ON raw_child_records (pregnancy_id);
-          END IF;
-        END $$;
-        """,
         # --- NFHS lookup ---
         "CREATE INDEX IF NOT EXISTS idx_nfhs_district_round   ON nfhs_indicators (district, nfhs_round);",
 
@@ -1243,6 +1641,136 @@ def apply_spatial_enrichment(engine):
     ], "spatial_enrich_indexes")
 
 
+def apply_nhm_views(engine):
+    """
+    Create v_nhm_mothers_flat — a wide read view per (record_id, pregnancy_num)
+    that joins nhm_mothers + nhm_pregnancies + ANC visits 1..5 + first 3 children
+    + a home-visit summary. Replaces the legacy `mothers` wide table for
+    downstream analytics that prefer a flat shape.
+    """
+    logger.info("Creating NHM flat view…")
+    sql = """
+    DROP VIEW IF EXISTS v_nhm_mothers_flat CASCADE;
+    CREATE VIEW v_nhm_mothers_flat AS
+    SELECT
+        m.record_id,
+        m.sangrah_id,
+        m.name_woman,
+        m.year_of_birth,
+        m.age_mother,
+        m.age_calc,
+        m.education_woman,
+        m.name_husband,
+        m.education_husband,
+        m.district_res,
+        m.block_res,
+        m.phc_res,
+        m.sc_res,
+        m.village_res,
+        m.address_res,
+        m.shg_member,
+        m.mcts_rch_id,
+        m.mobile_number,
+        m.abha_id,
+        m.mhis_id,
+        m.gps_location,
+        m.created_at,
+        m.modified_at,
+
+        p.pregnancy_num,
+        p.lmp,
+        p.edd,
+        p.edd_disp,
+        p.gravida,
+        p.parity,
+        p.abortion,
+        p.living,
+        p.district           AS preg_district,
+        p.district_code_lgd  AS preg_district_code_lgd,
+        p.block              AS preg_block,
+        p.phc                AS preg_phc,
+        p.subcentre_reg      AS preg_subcentre,
+        p.anmhw              AS preg_anmhw,
+        p.village            AS preg_village,
+        p.blood_group,
+        p.registration_date,
+
+        a1.visit_date AS anc1_date, a1.weight_kg AS anc1_weight_kg,
+        a1.haemoglobin AS anc1_hb, a1.bp_systolic AS anc1_bp_sys,
+        a1.bp_diastolic AS anc1_bp_dia, a1.services AS anc1_services,
+        a1.danger_signs AS anc1_danger_signs, a1.risk_factors AS anc1_risk_factors,
+
+        a2.visit_date AS anc2_date, a2.weight_kg AS anc2_weight_kg,
+        a2.haemoglobin AS anc2_hb, a2.bp_systolic AS anc2_bp_sys,
+        a2.bp_diastolic AS anc2_bp_dia, a2.services AS anc2_services,
+        a2.danger_signs AS anc2_danger_signs, a2.risk_factors AS anc2_risk_factors,
+
+        a3.visit_date AS anc3_date, a3.weight_kg AS anc3_weight_kg,
+        a3.haemoglobin AS anc3_hb, a3.bp_systolic AS anc3_bp_sys,
+        a3.bp_diastolic AS anc3_bp_dia, a3.services AS anc3_services,
+        a3.danger_signs AS anc3_danger_signs, a3.risk_factors AS anc3_risk_factors,
+
+        a4.visit_date AS anc4_date, a4.weight_kg AS anc4_weight_kg,
+        a4.haemoglobin AS anc4_hb, a4.bp_systolic AS anc4_bp_sys,
+        a4.bp_diastolic AS anc4_bp_dia, a4.services AS anc4_services,
+        a4.danger_signs AS anc4_danger_signs, a4.risk_factors AS anc4_risk_factors,
+
+        a5.visit_date AS anc5_date, a5.weight_kg AS anc5_weight_kg,
+        a5.haemoglobin AS anc5_hb, a5.bp_systolic AS anc5_bp_sys,
+        a5.bp_diastolic AS anc5_bp_dia, a5.services AS anc5_services,
+        a5.danger_signs AS anc5_danger_signs, a5.risk_factors AS anc5_risk_factors,
+
+        c1.gender AS child1_gender, c1.weight_kg AS child1_weight_kg,
+        c1.dob AS child1_dob, c1.breastfed AS child1_breastfed,
+        c1.immunization AS child1_immunization,
+
+        c2.gender AS child2_gender, c2.weight_kg AS child2_weight_kg,
+        c2.dob AS child2_dob, c2.breastfed AS child2_breastfed,
+        c2.immunization AS child2_immunization,
+
+        c3.gender AS child3_gender, c3.weight_kg AS child3_weight_kg,
+        c3.dob AS child3_dob, c3.breastfed AS child3_breastfed,
+        c3.immunization AS child3_immunization,
+
+        hv.last_home_visit_date,
+        hv.home_visit_count
+    FROM nhm_mothers m
+    JOIN nhm_pregnancies p USING (record_id)
+    LEFT JOIN nhm_anc_visits a1
+        ON a1.record_id = p.record_id AND a1.pregnancy_num = p.pregnancy_num AND a1.anc_visit_num = 1
+    LEFT JOIN nhm_anc_visits a2
+        ON a2.record_id = p.record_id AND a2.pregnancy_num = p.pregnancy_num AND a2.anc_visit_num = 2
+    LEFT JOIN nhm_anc_visits a3
+        ON a3.record_id = p.record_id AND a3.pregnancy_num = p.pregnancy_num AND a3.anc_visit_num = 3
+    LEFT JOIN nhm_anc_visits a4
+        ON a4.record_id = p.record_id AND a4.pregnancy_num = p.pregnancy_num AND a4.anc_visit_num = 4
+    LEFT JOIN nhm_anc_visits a5
+        ON a5.record_id = p.record_id AND a5.pregnancy_num = p.pregnancy_num AND a5.anc_visit_num = 5
+    LEFT JOIN nhm_children c1
+        ON c1.record_id = p.record_id AND c1.pregnancy_num = p.pregnancy_num AND c1.child_num = 1
+    LEFT JOIN nhm_children c2
+        ON c2.record_id = p.record_id AND c2.pregnancy_num = p.pregnancy_num AND c2.child_num = 2
+    LEFT JOIN nhm_children c3
+        ON c3.record_id = p.record_id AND c3.pregnancy_num = p.pregnancy_num AND c3.child_num = 3
+    LEFT JOIN (
+        SELECT record_id, pregnancy_num,
+               MAX(record_date) AS last_home_visit_date,
+               COUNT(*)         AS home_visit_count
+        FROM   nhm_home_visits
+        GROUP  BY record_id, pregnancy_num
+    ) hv ON hv.record_id = p.record_id AND hv.pregnancy_num = p.pregnancy_num;
+
+    COMMENT ON VIEW v_nhm_mothers_flat IS
+      'Denormalized read view of the NHM mother dataset — one row per (record_id, pregnancy_num) with all 5 ANC visits, first 3 children, and home-visit summary joined. Use this for ad-hoc reporting; use the underlying nhm_* tables for any write or fine-grained query.';
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(sql))
+        logger.info("  ✓ v_nhm_mothers_flat created")
+    except Exception as exc:
+        logger.warning("[nhm_views] failed: %s", str(exc)[:240])
+
+
 def apply_comments(engine):
     """Apply table-level and key column-level comments for schema documentation."""
     logger.info("Applying table and column comments…")
@@ -1285,22 +1813,21 @@ def apply_comments(engine):
         "meghealth_geo_mapping":
             "Meghealth application's internal geographic hierarchy: district → block → PHC → sub-centre → village. Used to map health service delivery areas to administrative boundaries.",
         # Health data
-        "anc_visits":
-            "Individual Antenatal Care (ANC) visit records with clinical vitals (weight, blood pressure, haemoglobin), medications administered (IFA, TT, calcium), danger sign assessments, and high-risk flags. ~361,551 visits.",
         "village_indicators_monthly":
             "Monthly aggregated maternal and child health indicators at village level — registration counts, ANC coverage rates, institutional delivery percentages, immunization counts, and nutritional status metrics. ~133,071 records.",
-        # Raw records
-        "raw_anc_records":
-            "Unprocessed Meghealth API responses for ANC visits with all original fields preserved as individual columns. Use anc_visits for the cleaned/structured version. ~361,508 records.",
-        "raw_child_records":
-            "Unprocessed Meghealth API responses for child/infant tracking with all original fields preserved. Includes birth details, immunization records, and growth monitoring data.",
-        # Mother App curated dataset (replaces legacy mother_journeys + raw_pregnancy_records)
-        "mothers":
-            "Curated Mother App dataset — one row per pregnancy. Sourced from flattened_mothers.csv (the authoritative Mother App API export). Covers identity, demographics, registration, risk assessment, ANC aggregates, slope/trend features (hb/weight/BP), abortion, scheme enrolment, delivery outcome, and maternal death. ~426k records. Replaces the legacy mother_journeys table.",
-        "mother_anc_visits_flat":
-            "Long-form ANC visits unpivoted from the flattened Mother App CSV (anc1..anc4 blocks). One row per actually recorded ANC visit. Distinct from anc_visits, which is sourced from a different curated CSV and includes foetal HR / fundal height plus visits beyond #4.",
-        "mother_children":
-            "Long-form child outcome rows unpivoted from the flattened Mother App CSV (child1..child3 blocks). One row per delivered child with gender, weight, breastfeeding, and immunization-at-birth fields.",
+        # NHM mother dataset (live API)
+        "raw.nhm_records_raw":
+            "Source-of-truth landing table for the NHM Megh formdata API mother form (5fa5510a4794b76e71267ebb). One row per record _id with the full JSON document in payload (JSONB). All other nhm_* tables are derived from this; downstream agents should query the normalized tables or v_nhm_mothers_flat.",
+        "nhm_mothers":
+            "Per-mother demographics flattened from the NHM formdata API (one row per record_id). Includes name, age, education, residence, ABHA/MHIS ids, mobile, and capture device metadata. PII-restricted in privacy mode.",
+        "nhm_pregnancies":
+            "One row per pregnancy in pregnancy_serial_number_grp[]. Captures LMP/EDD, GPADL obstetric history, and registration location (block, PHC, ANM, blood group, registration_date). FK→nhm_mothers via record_id.",
+        "nhm_anc_visits":
+            "One row per ANC visit (1–5) in ANC_visits_grp_N. Captures clinical vitals (weight, Hb, BP, blood sugar) plus services, danger signs, risk factors, referrals and USG indications as TEXT[]. FK→nhm_pregnancies.",
+        "nhm_children":
+            "One row per delivered child in delivery_grp.child_grp.child_rpt_grp[]. Captures gender, weight, DOB, breastfeeding, immunization, and birth defects. FK→nhm_pregnancies.",
+        "nhm_home_visits":
+            "One row per ANM/ASHA home visit in home_visit_grp.hv_group. Captures the visit date, the worker who performed it, and active-ASHA status. FK→nhm_pregnancies.",
         # Reference JSON
         "nfhs_indicators":
             "National Family Health Survey (NFHS) rounds 3, 4, and 5 district-level indicators for Meghalaya — covering nutrition, immunization, maternal health, family planning, and child mortality. 624 records across all districts and rounds.",
@@ -1311,32 +1838,28 @@ def apply_comments(engine):
     }
 
     col_comments = {
-        "mothers": {
-            "mother_id":
-                "Mother App mother identifier. Non-unique on its own — mothers with multiple pregnancies have multiple rows.",
-            "pregnancy_number":
-                "Sequence number of this pregnancy for the mother (1, 2, …). Together with mother_id forms the composite natural key.",
-            "lgd_district_code":
-                "LGD district code from the Mother App registration. Use master_districts for the canonical district reference.",
-            "high_risk_at_reg":
-                "Whether the pregnancy was flagged as high-risk at the time of initial registration in the Mother App.",
-            "has_delivery":
-                "Boolean flag — true if the pregnancy reached a recorded delivery event.",
+        "nhm_mothers": {
+            "record_id":   "API _id from data.nhmmegh.in formdata. Stable across refreshes; primary key for the entire NHM mother schema.",
+            "sangrah_id":  "Mother App registration identifier (e.g. MOTHER-234544). Privacy-restricted.",
+            "mcts_rch_id": "MCTS/RCH identifier issued by the Government of India. Privacy-restricted.",
         },
-        "mother_anc_visits_flat": {
-            "anc_visit_num":
-                "ANC visit ordinal (1–4) — corresponds to the anc1..anc4 column blocks in the source flattened CSV.",
-            "date":
-                "Date the ANC visit was recorded. Rows with no date are excluded at load time.",
+        "nhm_pregnancies": {
+            "pregnancy_num":     "Per-mother pregnancy ordinal (1, 2, …) sourced from pregnancy_serial_number_calc.",
+            "district_code_lgd": "LGD district code captured at registration. Use this to JOIN to master_districts / districts rather than the free-text district name.",
+            "gravida":           "Total number of pregnancies including the current one (GPADL.gravida).",
+            "parity":            "Number of previous pregnancies carried to viable gestational age (GPADL.parity_calculate).",
         },
-        "mother_children": {
-            "child_num":
-                "Child ordinal within this pregnancy (1–3) — corresponds to the child1..child3 column blocks in the source CSV.",
+        "nhm_anc_visits": {
+            "anc_visit_num": "ANC visit ordinal (1–5) — corresponds to ANC_visits_grp_N in the source document.",
+            "services":      "Array of services delivered at this visit (e.g. 'IFA', 'Calcium', 'TT').",
+            "danger_signs":  "Array of danger signs observed during the visit.",
         },
-        "anc_visits": {
-            "anc_id":    "Unique ANC visit identifier assigned by the Meghealth system.",
-            "mother_id": "Mother identifier linking this visit to the corresponding records in mother_journeys.",
-            "visit_date": "Date when the ANC visit was conducted.",
+        "nhm_children": {
+            "child_num": "Child ordinal within this pregnancy (1, 2, …) — order in delivery_grp.child_grp.child_rpt_grp[].",
+        },
+        "raw.nhm_records_raw": {
+            "payload":    "Full original NHM API record as JSONB. GIN-indexed for arbitrary path/key queries — use this only when the normalized columns lack the field you need.",
+            "fetched_at": "Wall-clock time when the record was loaded into AlloyDB by migrate_mecdm.py.",
         },
         "states": {
             "id":            "GIS feature identifier (renamed from objectid in source GeoJSON).",
@@ -1380,12 +1903,6 @@ def apply_comments(engine):
             "anganwadi_centre_id": "Unique Anganwadi centre identifier.",
             "geometry_x":         "Longitude (duplicate of longitude column, kept for source compatibility).",
             "geometry_y":         "Latitude (duplicate of latitude column, kept for source compatibility).",
-        },
-        "raw_anc_records": {
-            "mother_id": "Mother identifier extracted from the raw JSON for cross-referencing with mothers.",
-        },
-        "raw_child_records": {
-            "mother_id": "Mother identifier extracted from the raw JSON for cross-referencing with mothers.",
         },
         "master_districts": {
             "district_code_lgd": "LGD district code — the canonical identifier for this district.",
@@ -1433,7 +1950,6 @@ def apply_comments(engine):
 
 def run_migration(args):
     only = getattr(args, "only", None)
-    skip_raw_json = getattr(args, "skip_raw_json", False)
     skip_if_exists = getattr(args, "skip_if_exists", False)
     do_drop = getattr(args, "drop", False)
     do_truncate = getattr(args, "truncate", False)
@@ -1521,53 +2037,23 @@ def run_migration(args):
                        "meghealth_geography_mapping.csv", "meghealth_geo_mapping")
 
     # ------------------------------------------------------------------
-    # 5. Health data tables (large CSVs — COPY protocol)
+    # 5. Health data tables (small CSVs)
     # ------------------------------------------------------------------
     if stage("health"):
         logger.info("=== Stage: Health data tables ===")
-        load_csv_large(
-            engine,
-            OUTPUT_DIR / "anc_visits_detail.csv",
-            "anc_visits",
-            skip_if_exists=skip_if_exists,
-        )
         load_csv_small(engine, OUTPUT_DIR /
                        "village_indicators_monthly.csv", "village_indicators_monthly")
 
     # ------------------------------------------------------------------
-    # 5b. Mother App curated dataset (flattened_mothers.csv → 3 tables)
+    # 5b. NHM mother dataset (live API JSONL → 6 tables)
     # ------------------------------------------------------------------
-    if stage("mother_app"):
-        logger.info("=== Stage: Mother App curated dataset ===")
-        load_flattened_mothers(
+    if stage("nhm_mother"):
+        logger.info("=== Stage: NHM Mother formdata (live API) ===")
+        load_nhm_formdata(
             engine,
-            _HERE / "mecdm_dataset" / "flattened_mothers.csv",
+            _HERE / "mecdm_dataset" / "nhm_formdata.jsonl",
             skip_if_exists=skip_if_exists,
         )
-
-    # ------------------------------------------------------------------
-    # 6. Raw JSON records (large — normalized relational tables)
-    # ------------------------------------------------------------------
-    if stage("raw_json") and not skip_raw_json:
-        logger.info("=== Stage: Raw JSON records (normalized relational) ===")
-        logger.warning(
-            "Loading ~961 MB of JSON data. This requires ~3-4 GB RAM. "
-            "Use --skip-raw-json to bypass."
-        )
-        load_json_normalized(
-            engine,
-            OUTPUT_DIR / "raw_anc_records.json",
-            "raw_anc_records",
-            skip_if_exists=skip_if_exists,
-        )
-        load_json_normalized(
-            engine,
-            OUTPUT_DIR / "raw_child_records.json",
-            "raw_child_records",
-            skip_if_exists=skip_if_exists,
-        )
-    elif skip_raw_json:
-        logger.info("Skipping raw JSON records (--skip-raw-json)")
 
     # ------------------------------------------------------------------
     # 7. Reference JSON tables (small — flat relational)
@@ -1591,6 +2077,7 @@ def run_migration(args):
         apply_foreign_keys(engine)
         apply_indexes(engine)
         apply_spatial_enrichment(engine)
+        apply_nhm_views(engine)
         apply_comments(engine)
 
     logger.info("Migration complete!")
@@ -1608,16 +2095,11 @@ def _parse_args():
     )
     parser.add_argument(
         "--only",
-        choices=["geo", "master", "infra", "health", "mother_app",
-                 "raw_json", "ref_json", "schema"],
+        choices=["geo", "master", "infra", "health", "nhm_mother",
+                 "ref_json", "schema"],
         default=None,
         metavar="STAGE",
         help="Run only a specific migration stage.",
-    )
-    parser.add_argument(
-        "--skip-raw-json",
-        action="store_true",
-        help="Skip the three large raw JSON files (~961 MB total).",
     )
     parser.add_argument(
         "--skip-if-exists",
