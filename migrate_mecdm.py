@@ -6,15 +6,18 @@ Meghalaya Early Childhood Development Mission
 Migrates all geographic, master-reference, health, and raw-data tables
 from the local mecdm_dataset folder into AlloyDB (PostGIS-enabled Postgres).
 
-Tables created (25 total):
+Tables created:
   Geographic  : states, districts, district_boundaries, subdistricts, blocks,
                 villages_poly, villages_point
   Master ref  : master_districts, master_blocks, master_villages,
                 master_health_facilities, geo_full_mapping, geo_match_report
   Infrastructure: health_facilities, anganwadi_centres
   Geography   : meghealth_geo_mapping
-  Health data : mother_journeys, anc_visits, village_indicators_monthly
-  Raw records : raw_anc_records, raw_child_records, raw_pregnancy_records
+  Health data : anc_visits, village_indicators_monthly
+  Mother App  : mothers, mother_anc_visits_flat, mother_children
+                (curated Mother App dataset — replaces legacy mother_journeys
+                 and raw_pregnancy_records)
+  Raw records : raw_anc_records, raw_child_records
   Reference   : nfhs_indicators, video_library, research_articles
 
 Usage:
@@ -24,6 +27,7 @@ Usage:
     python migrate_mecdm.py --only master          # master/reference tables only
     python migrate_mecdm.py --only infra           # infrastructure tables only
     python migrate_mecdm.py --only health          # health CSV tables only
+    python migrate_mecdm.py --only mother_app      # Mother App flattened CSV → mothers/anc/children
     python migrate_mecdm.py --only raw_json        # raw JSON tables only
     python migrate_mecdm.py --only ref_json        # reference JSON tables only
     python migrate_mecdm.py --only schema          # PKs/FKs/indexes/comments only
@@ -104,11 +108,15 @@ STAGE_TABLES: dict[str, list[str]] = {
         "anganwadi_centres", "health_facilities",
     ],
     "health": [
-        "anc_visits", "mother_journeys",
+        "anc_visits",
         "village_indicators_monthly",
     ],
+    "mother_app": [
+        # Children listed before parent for safe sequential DROP
+        "mother_children", "mother_anc_visits_flat", "mothers",
+    ],
     "raw_json": [
-        "raw_anc_records", "raw_child_records", "raw_pregnancy_records",
+        "raw_anc_records", "raw_child_records",
     ],
     "ref_json": [
         "nfhs_indicators", "video_library", "research_articles",
@@ -279,7 +287,8 @@ def load_geojson(engine, filepath: str | Path, table_name: str, comment: str = "
                 else:
                     gdf = gdf.drop(columns=["id"])
             gdf = gdf.rename(columns={"objectid_1": "id"})
-        geom_type = gdf.geometry.geom_type.mode()[0].upper() if not gdf.empty else "GEOMETRY"
+        geom_type = gdf.geometry.geom_type.mode(
+        )[0].upper() if not gdf.empty else "GEOMETRY"
         _drop_cascade(engine, table_name)
         gdf.to_postgis(
             table_name, engine,
@@ -322,7 +331,8 @@ def load_csv_with_points(
     if not filepath.exists():
         logger.warning(f"File not found, skipping {table_name}: {filepath}")
         return
-    logger.info(f"Loading {filepath.name} → {table_name} (with POINT geometry)…")
+    logger.info(
+        f"Loading {filepath.name} → {table_name} (with POINT geometry)…")
     try:
         df = pd.read_csv(filepath, low_memory=False)
         df[lat_col] = pd.to_numeric(df[lat_col], errors="coerce")
@@ -332,7 +342,8 @@ def load_csv_with_points(
         invalid = df[df[lat_col].isna() | df[lon_col].isna()].copy()
 
         if valid.empty:
-            logger.warning(f"  No valid coordinates in {table_name}, loading without geometry")
+            logger.warning(
+                f"  No valid coordinates in {table_name}, loading without geometry")
             _drop_cascade(engine, table_name)
             df.to_sql(table_name, engine, if_exists="replace", index=False)
             return
@@ -350,10 +361,12 @@ def load_csv_with_points(
             dtype={"geom": Geometry("POINT", srid=4326)},
         )
         if not invalid.empty:
-            logger.warning(f"  {len(invalid)} rows missing coordinates — appended without geometry")
+            logger.warning(
+                f"  {len(invalid)} rows missing coordinates — appended without geometry")
             invalid.to_sql(table_name, engine, if_exists="append", index=False)
 
-        logger.info(f"  ✓ {table_name}: {len(df):,} rows ({len(valid):,} with geometry)")
+        logger.info(
+            f"  ✓ {table_name}: {len(df):,} rows ({len(valid):,} with geometry)")
     except Exception as exc:
         logger.error(f"Failed {table_name}: {exc}")
         raise
@@ -384,7 +397,8 @@ def load_csv_large(
             return
 
     size_mb = filepath.stat().st_size / 1024 / 1024
-    logger.info(f"Loading {filepath.name} → {table_name} ({size_mb:.0f} MB, COPY protocol)…")
+    logger.info(
+        f"Loading {filepath.name} → {table_name} ({size_mb:.0f} MB, COPY protocol)…")
     _drop_cascade(engine, table_name)
 
     reader = pd.read_csv(
@@ -406,7 +420,8 @@ def load_csv_large(
         for chunk_num, chunk in enumerate(reader):
             if not table_created:
                 # Create empty table structure from first chunk
-                chunk.head(0).to_sql(table_name, engine, if_exists="replace", index=False)
+                chunk.head(0).to_sql(table_name, engine,
+                                     if_exists="replace", index=False)
                 table_created = True
 
             buf = io.StringIO()
@@ -480,7 +495,8 @@ def load_json_flat(
             sample = df[col].dropna().head(5)
             if len(sample) > 0 and isinstance(sample.iloc[0], (list, dict)):
                 df[col] = df[col].apply(
-                    lambda x: json.dumps(x) if isinstance(x, (list, dict)) else x
+                    lambda x: json.dumps(x) if isinstance(
+                        x, (list, dict)) else x
                 )
 
         _drop_cascade(engine, table_name)
@@ -518,7 +534,8 @@ def load_json_normalized(
             return
 
     size_mb = filepath.stat().st_size / 1024 / 1024
-    logger.info(f"Loading {filepath.name} → {table_name} ({size_mb:.0f} MB, normalized JSON)…")
+    logger.info(
+        f"Loading {filepath.name} → {table_name} ({size_mb:.0f} MB, normalized JSON)…")
 
     logger.info("  Reading JSON into memory…")
     with open(filepath) as f:
@@ -554,7 +571,7 @@ def load_json_normalized(
 
     try:
         for batch_start in range(0, len(df), BATCH_SIZE):
-            chunk = df.iloc[batch_start : batch_start + BATCH_SIZE]
+            chunk = df.iloc[batch_start: batch_start + BATCH_SIZE]
             buf = io.StringIO()
             if batch_start == 0:
                 chunk.to_csv(buf, index=False, na_rep="")
@@ -583,6 +600,211 @@ def load_json_normalized(
     except Exception as exc:
         raw_conn.rollback()
         logger.error(f"Failed {table_name}: {exc}")
+        raise
+    finally:
+        cursor.close()
+        raw_conn.close()
+
+
+# ===========================================================================
+# Mother App loader — flattened_mothers.csv → 3 normalized tables
+# ===========================================================================
+
+# Per-visit and per-child field suffixes (the part after `ancN_` / `childN_`)
+_ANC_FIELDS = [
+    "date", "gestational_age_wks", "place", "weight_kg", "haemoglobin",
+    "bp_systolic", "bp_diastolic", "blood_sugar_fasting", "blood_sugar_pp",
+    "high_risk", "risk_factors", "danger_signs", "services",
+    "ifa_tablets", "urine_albumin", "urine_sugar",
+]
+_CHILD_FIELDS = [
+    "gender", "weight_kg", "cried_at_birth", "dob",
+    "defects", "breastfed", "immunization",
+]
+
+
+def _copy_chunk(cursor, table_name: str, df: pd.DataFrame, write_header: bool):
+    """COPY a DataFrame into an existing table via psycopg2 copy_expert."""
+    if df.empty:
+        return
+    buf = io.StringIO()
+    if write_header:
+        df.to_csv(buf, index=False, na_rep="")
+        buf.seek(0)
+        cursor.copy_expert(
+            f"COPY {table_name} FROM STDIN WITH (FORMAT CSV, HEADER, NULL '')",
+            buf,
+        )
+    else:
+        df.to_csv(buf, index=False, header=False, na_rep="")
+        buf.seek(0)
+        cursor.copy_expert(
+            f"COPY {table_name} FROM STDIN WITH (FORMAT CSV, NULL '')",
+            buf,
+        )
+
+
+def _split_flattened_chunk(chunk: pd.DataFrame):
+    """
+    Split one chunk of the flattened_mothers CSV into 3 DataFrames:
+    (mothers_wide, anc_long, children_long).
+    """
+    # mothers_wide: drop all anc{N}_* and child{N}_* columns
+    wide_cols = [
+        c for c in chunk.columns
+        if not (c.startswith(("anc1_", "anc2_", "anc3_", "anc4_",
+                              "child1_", "child2_", "child3_")))
+    ]
+    mothers_wide = chunk[wide_cols].copy()
+
+    key_cols = ["mother_id", "pregnancy_number"]
+
+    # ── ANC long form ──────────────────────────────────────────────────────
+    anc_frames = []
+    for n in range(1, 5):
+        prefix = f"anc{n}_"
+        src_cols = [
+            prefix + f for f in _ANC_FIELDS if (prefix + f) in chunk.columns]
+        if not src_cols:
+            continue
+        sub = chunk[key_cols + src_cols].copy()
+        sub.columns = key_cols + [c[len(prefix):] for c in src_cols]
+        sub.insert(2, "anc_visit_num", n)
+        # Skip rows with no recorded date (visit didn't happen)
+        sub = sub[sub["date"].notna()]
+        anc_frames.append(sub)
+    anc_long = (
+        pd.concat(anc_frames, ignore_index=True)
+        if anc_frames else pd.DataFrame(
+            columns=key_cols + ["anc_visit_num"] + _ANC_FIELDS
+        )
+    )
+
+    # ── Children long form ─────────────────────────────────────────────────
+    child_frames = []
+    for n in range(1, 4):
+        prefix = f"child{n}_"
+        src_cols = [
+            prefix + f for f in _CHILD_FIELDS if (prefix + f) in chunk.columns]
+        if not src_cols:
+            continue
+        sub = chunk[key_cols + src_cols].copy()
+        sub.columns = key_cols + [c[len(prefix):] for c in src_cols]
+        sub.insert(2, "child_num", n)
+        # Skip rows where every child field is null
+        data_cols = [
+            c for c in sub.columns if c not in key_cols + ["child_num"]]
+        sub = sub.dropna(how="all", subset=data_cols)
+        child_frames.append(sub)
+    children_long = (
+        pd.concat(child_frames, ignore_index=True)
+        if child_frames else pd.DataFrame(
+            columns=key_cols + ["child_num"] + _CHILD_FIELDS
+        )
+    )
+
+    return mothers_wide, anc_long, children_long
+
+
+def load_flattened_mothers(
+    engine,
+    filepath: str | Path,
+    skip_if_exists: bool = False,
+):
+    """
+    Load the curated Mother App `flattened_mothers.csv` into 3 normalized tables:
+      mothers                 — one row per pregnancy (wide)
+      mother_anc_visits_flat  — long form of anc1..anc4 blocks
+      mother_children         — long form of child1..child3 blocks
+
+    Streams the CSV in chunks to keep memory bounded; uses psycopg2 COPY for
+    high-throughput bulk insert (mirrors load_csv_large).
+    """
+    filepath = Path(filepath)
+    if not filepath.exists():
+        logger.warning(f"File not found, skipping mother_app: {filepath}")
+        return
+
+    targets = ("mothers", "mother_anc_visits_flat", "mother_children")
+    if skip_if_exists and all(table_exists(engine, t) for t in targets):
+        if all(get_row_count(engine, t) > 0 for t in targets):
+            logger.info("Skipping mother_app — all 3 tables already populated")
+            return
+
+    size_mb = filepath.stat().st_size / 1024 / 1024
+    logger.info(
+        f"Loading {filepath.name} → mothers / mother_anc_visits_flat / "
+        f"mother_children ({size_mb:.0f} MB, COPY protocol)…"
+    )
+
+    # Drop downstream tables before parents (FK-safe even without CASCADE)
+    for tbl in ("mother_children", "mother_anc_visits_flat", "mothers"):
+        _drop_cascade(engine, tbl)
+
+    reader = pd.read_csv(
+        filepath,
+        chunksize=CHUNKSIZE,
+        low_memory=False,
+        dtype=str,
+        keep_default_na=True,
+        na_values=["", "NA", "N/A", "null", "NULL", "None"],
+    )
+
+    tables_created = False
+    totals = {"mothers": 0, "mother_anc_visits_flat": 0, "mother_children": 0}
+    start_time = datetime.now()
+    raw_conn = get_psycopg2_conn()
+    cursor = raw_conn.cursor()
+
+    try:
+        for chunk_num, chunk in enumerate(reader):
+            mothers_wide, anc_long, children_long = _split_flattened_chunk(
+                chunk)
+
+            if not tables_created:
+                # Create empty DDL for all 3 tables from the first chunk's columns
+                mothers_wide.head(0).to_sql(
+                    "mothers", engine, if_exists="replace", index=False)
+                anc_long.head(0).to_sql(
+                    "mother_anc_visits_flat", engine,
+                    if_exists="replace", index=False)
+                children_long.head(0).to_sql(
+                    "mother_children", engine,
+                    if_exists="replace", index=False)
+                tables_created = True
+
+            write_header = (chunk_num == 0)
+            _copy_chunk(cursor, "mothers", mothers_wide, write_header)
+            _copy_chunk(cursor, "mother_anc_visits_flat",
+                        anc_long, write_header)
+            _copy_chunk(cursor, "mother_children", children_long, write_header)
+
+            totals["mothers"] += len(mothers_wide)
+            totals["mother_anc_visits_flat"] += len(anc_long)
+            totals["mother_children"] += len(children_long)
+
+            if totals["mothers"] % 50_000 == 0:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                rate = totals["mothers"] / elapsed if elapsed > 0 else 0
+                logger.info(
+                    f"  … {totals['mothers']:,} mothers "
+                    f"({rate:,.0f} rows/s) — "
+                    f"anc={totals['mother_anc_visits_flat']:,} "
+                    f"children={totals['mother_children']:,}"
+                )
+                raw_conn.commit()
+
+        raw_conn.commit()
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            f"  ✓ mothers: {totals['mothers']:,} | "
+            f"mother_anc_visits_flat: {totals['mother_anc_visits_flat']:,} | "
+            f"mother_children: {totals['mother_children']:,} "
+            f"in {elapsed:.1f}s"
+        )
+    except Exception as exc:
+        raw_conn.rollback()
+        logger.error(f"Failed mother_app load: {exc}")
         raise
     finally:
         cursor.close()
@@ -641,18 +863,20 @@ def apply_primary_keys(engine):
         "ALTER TABLE master_villages ADD PRIMARY KEY (village_id);",
         "ALTER TABLE master_health_facilities ADD PRIMARY KEY (facility_id);",
         # Core health data
-        # pregnancy_id has NULL values for mothers registered without a tracked
-        # pregnancy (child-only records), so it cannot be a NOT NULL primary key.
-        # Use a SERIAL surrogate PK + UNIQUE constraint on pregnancy_id.
-        # PostgreSQL UNIQUE allows multiple NULLs, so this succeeds even with
-        # nulls AND still satisfies FK references from raw_pregnancy_records.
-        "ALTER TABLE mother_journeys ADD COLUMN row_id SERIAL PRIMARY KEY;",
-        "ALTER TABLE mother_journeys ADD CONSTRAINT uq_pregnancy_id UNIQUE (pregnancy_id);",
         "ALTER TABLE anc_visits ADD PRIMARY KEY (anc_id);",
         # Raw records — surrogate serial key (natural keys may have duplicates/nulls)
         "ALTER TABLE raw_anc_records ADD COLUMN row_id SERIAL PRIMARY KEY;",
         "ALTER TABLE raw_child_records ADD COLUMN row_id SERIAL PRIMARY KEY;",
-        "ALTER TABLE raw_pregnancy_records ADD COLUMN row_id SERIAL PRIMARY KEY;",
+        # Mother App curated dataset
+        # mothers: surrogate PK + UNIQUE on (mother_id, pregnancy_number).
+        # The composite serves as the FK target for the long-form child tables.
+        "ALTER TABLE mothers ADD COLUMN row_id SERIAL PRIMARY KEY;",
+        "ALTER TABLE mothers ADD CONSTRAINT uq_mothers_mid_preg "
+        "UNIQUE (mother_id, pregnancy_number);",
+        "ALTER TABLE mother_anc_visits_flat ADD CONSTRAINT pk_manc "
+        "PRIMARY KEY (mother_id, pregnancy_number, anc_visit_num);",
+        "ALTER TABLE mother_children ADD CONSTRAINT pk_mchildren "
+        "PRIMARY KEY (mother_id, pregnancy_number, child_num);",
         # Reference JSON
         "ALTER TABLE video_library ADD PRIMARY KEY (id);",
         "ALTER TABLE research_articles ADD PRIMARY KEY (id);",
@@ -779,52 +1003,22 @@ def apply_foreign_keys(engine):
         # blocks & district_boundaries have no LGD codes — join by district name only
         # (no DB-level FK possible; use logical joins in application layer)
 
-        # ── Health / pregnancy FKs ─────────────────────────────────────────────
-        # raw_pregnancy_records.pregnancy_id → mother_journeys.pregnancy_id
-        # (pregnancy_id is the PK of mother_journeys)
+        # ── Mother App curated dataset FKs ─────────────────────────────────────
+        # mother_anc_visits_flat → mothers (composite key)
         """
-        ALTER TABLE raw_pregnancy_records
-          ADD CONSTRAINT fk_raw_preg_pregnancy_id
-          FOREIGN KEY (pregnancy_id)
-          REFERENCES mother_journeys(pregnancy_id)
+        ALTER TABLE mother_anc_visits_flat
+          ADD CONSTRAINT fk_manc_mothers
+          FOREIGN KEY (mother_id, pregnancy_number)
+          REFERENCES mothers(mother_id, pregnancy_number)
           ON DELETE CASCADE;
         """,
-        # raw_anc_records.pregnancy_id → mother_journeys.pregnancy_id
-        # (only if the column exists — raw ANC JSON may not include pregnancy_id)
+        # mother_children → mothers (composite key)
         """
-        DO $$
-        BEGIN
-          IF EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name   = 'raw_anc_records'
-              AND column_name  = 'pregnancy_id'
-          ) THEN
-            ALTER TABLE raw_anc_records
-              ADD CONSTRAINT fk_raw_anc_pregnancy_id
-              FOREIGN KEY (pregnancy_id)
-              REFERENCES mother_journeys(pregnancy_id)
-              ON DELETE CASCADE;
-          END IF;
-        END $$;
-        """,
-        # raw_child_records.pregnancy_id → mother_journeys.pregnancy_id
-        """
-        DO $$
-        BEGIN
-          IF EXISTS (
-            SELECT 1 FROM information_schema.columns
-            WHERE table_schema = 'public'
-              AND table_name   = 'raw_child_records'
-              AND column_name  = 'pregnancy_id'
-          ) THEN
-            ALTER TABLE raw_child_records
-              ADD CONSTRAINT fk_raw_child_pregnancy_id
-              FOREIGN KEY (pregnancy_id)
-              REFERENCES mother_journeys(pregnancy_id)
-              ON DELETE CASCADE;
-          END IF;
-        END $$;
+        ALTER TABLE mother_children
+          ADD CONSTRAINT fk_mchildren_mothers
+          FOREIGN KEY (mother_id, pregnancy_number)
+          REFERENCES mothers(mother_id, pregnancy_number)
+          ON DELETE CASCADE;
         """,
     ]
     for sql in fk_statements:
@@ -850,13 +1044,17 @@ def apply_indexes(engine):
         "CREATE INDEX IF NOT EXISTS idx_health_fac_geom      ON health_facilities USING GIST (geom);",
         "CREATE INDEX IF NOT EXISTS idx_anganwadi_geom       ON anganwadi_centres USING GIST (geom);",
 
-        # --- Mother / pregnancy lookups ---
-        # pregnancy_id is the PK so its index is implicit; keep mother_id indexed
-        # for lookups that join on the mother (multiple pregnancies per mother).
-        "CREATE INDEX IF NOT EXISTS idx_mother_id            ON mother_journeys (mother_id);",
-        "CREATE INDEX IF NOT EXISTS idx_mother_district_block ON mother_journeys (district, block);",
-        "CREATE INDEX IF NOT EXISTS idx_mother_reg_date       ON mother_journeys (registration_date);",
-        "CREATE INDEX IF NOT EXISTS idx_mother_delivery_date  ON mother_journeys (delivery_date);",
+        # --- Mother App curated dataset (mothers + long-form children) ---
+        # mother_id alone is non-unique (multiple pregnancies per mother).
+        "CREATE INDEX IF NOT EXISTS idx_mothers_mother_id        ON mothers (mother_id);",
+        "CREATE INDEX IF NOT EXISTS idx_mothers_district_block   ON mothers (district, block);",
+        "CREATE INDEX IF NOT EXISTS idx_mothers_reg_date         ON mothers (registration_date);",
+        "CREATE INDEX IF NOT EXISTS idx_mothers_delivery_date    ON mothers (delivery_date);",
+        "CREATE INDEX IF NOT EXISTS idx_mothers_lgd_district     ON mothers (lgd_district_code);",
+        "CREATE INDEX IF NOT EXISTS idx_manc_mother_id           ON mother_anc_visits_flat (mother_id);",
+        "CREATE INDEX IF NOT EXISTS idx_manc_visit_date          ON mother_anc_visits_flat (date);",
+        "CREATE INDEX IF NOT EXISTS idx_mchildren_mother_id      ON mother_children (mother_id);",
+        "CREATE INDEX IF NOT EXISTS idx_mchildren_dob            ON mother_children (dob);",
 
         # --- ANC visits ---
         "CREATE INDEX IF NOT EXISTS idx_anc_mother_id         ON anc_visits (mother_id);",
@@ -912,9 +1110,6 @@ def apply_indexes(engine):
           END IF;
         END $$;
         """,
-        "CREATE INDEX IF NOT EXISTS idx_raw_preg_mother_id    ON raw_pregnancy_records (mother_id);",
-        "CREATE INDEX IF NOT EXISTS idx_raw_preg_pregnancy_id ON raw_pregnancy_records (pregnancy_id);",
-
         # --- NFHS lookup ---
         "CREATE INDEX IF NOT EXISTS idx_nfhs_district_round   ON nfhs_indicators (district, nfhs_round);",
 
@@ -999,9 +1194,11 @@ def apply_spatial_enrichment(engine):
         try:
             with engine.begin() as conn:
                 result = conn.execute(text(sql))
-                logger.info(f"  [spatial_enrich] {label}: {result.rowcount} rows updated")
+                logger.info(
+                    f"  [spatial_enrich] {label}: {result.rowcount} rows updated")
         except Exception as exc:
-            logger.warning(f"  [spatial_enrich] skipped '{label}': {exc!s:.160}")
+            logger.warning(
+                f"  [spatial_enrich] skipped '{label}': {exc!s:.160}")
 
     # Step C: GIST indexes on the new geom columns
     _exec_sql(engine, [
@@ -1054,8 +1251,6 @@ def apply_comments(engine):
         "meghealth_geo_mapping":
             "Meghealth application's internal geographic hierarchy: district → block → PHC → sub-centre → village. Used to map health service delivery areas to administrative boundaries.",
         # Health data
-        "mother_journeys":
-            "Maternal journey records from pregnancy registration through delivery and child outcome. Each row is one pregnancy — mothers with multiple pregnancies have multiple rows. Covers registration details, ANC visit summaries, delivery outcomes, and child birth data. ~363,898 records.",
         "anc_visits":
             "Individual Antenatal Care (ANC) visit records with clinical vitals (weight, blood pressure, haemoglobin), medications administered (IFA, TT, calcium), danger sign assessments, and high-risk flags. ~361,551 visits.",
         "village_indicators_monthly":
@@ -1065,8 +1260,13 @@ def apply_comments(engine):
             "Unprocessed Meghealth API responses for ANC visits with all original fields preserved as individual columns. Use anc_visits for the cleaned/structured version. ~361,508 records.",
         "raw_child_records":
             "Unprocessed Meghealth API responses for child/infant tracking with all original fields preserved. Includes birth details, immunization records, and growth monitoring data.",
-        "raw_pregnancy_records":
-            "Unprocessed Meghealth API responses for pregnancy journeys with all original fields preserved. Includes registration, ANC summary, delivery, and outcome data.",
+        # Mother App curated dataset (replaces legacy mother_journeys + raw_pregnancy_records)
+        "mothers":
+            "Curated Mother App dataset — one row per pregnancy. Sourced from flattened_mothers.csv (the authoritative Mother App API export). Covers identity, demographics, registration, risk assessment, ANC aggregates, slope/trend features (hb/weight/BP), abortion, scheme enrolment, delivery outcome, and maternal death. ~426k records. Replaces the legacy mother_journeys table.",
+        "mother_anc_visits_flat":
+            "Long-form ANC visits unpivoted from the flattened Mother App CSV (anc1..anc4 blocks). One row per actually recorded ANC visit. Distinct from anc_visits, which is sourced from a different curated CSV and includes foetal HR / fundal height plus visits beyond #4.",
+        "mother_children":
+            "Long-form child outcome rows unpivoted from the flattened Mother App CSV (child1..child3 blocks). One row per delivered child with gender, weight, breastfeeding, and immunization-at-birth fields.",
         # Reference JSON
         "nfhs_indicators":
             "National Family Health Survey (NFHS) rounds 3, 4, and 5 district-level indicators for Meghalaya — covering nutrition, immunization, maternal health, family planning, and child mortality. 624 records across all districts and rounds.",
@@ -1077,17 +1277,27 @@ def apply_comments(engine):
     }
 
     col_comments = {
-        "mother_journeys": {
+        "mothers": {
             "mother_id":
-                "Meghealth mother identifier. Mothers with multiple pregnancies share the same mother_id across rows.",
-            "pregnancy_id":
-                "Composite identifier (<mother_id>-<sno>). NULL for child-only records where no pregnancy was registered in Meghealth.",
-            "gps_location":
-                "GPS coordinates stored as WKT text (POINT lon lat). Convert with: ST_GeomFromText(gps_location, 4326).",
-            "district":
-                "District name as free-text (not LGD-normalized). Use master_districts for standardized codes.",
-            "high_risk_at_registration":
-                "Whether the pregnancy was flagged as high-risk at the time of initial registration.",
+                "Mother App mother identifier. Non-unique on its own — mothers with multiple pregnancies have multiple rows.",
+            "pregnancy_number":
+                "Sequence number of this pregnancy for the mother (1, 2, …). Together with mother_id forms the composite natural key.",
+            "lgd_district_code":
+                "LGD district code from the Mother App registration. Use master_districts for the canonical district reference.",
+            "high_risk_at_reg":
+                "Whether the pregnancy was flagged as high-risk at the time of initial registration in the Mother App.",
+            "has_delivery":
+                "Boolean flag — true if the pregnancy reached a recorded delivery event.",
+        },
+        "mother_anc_visits_flat": {
+            "anc_visit_num":
+                "ANC visit ordinal (1–4) — corresponds to the anc1..anc4 column blocks in the source flattened CSV.",
+            "date":
+                "Date the ANC visit was recorded. Rows with no date are excluded at load time.",
+        },
+        "mother_children": {
+            "child_num":
+                "Child ordinal within this pregnancy (1–3) — corresponds to the child1..child3 column blocks in the source CSV.",
         },
         "anc_visits": {
             "anc_id":    "Unique ANC visit identifier assigned by the Meghealth system.",
@@ -1138,14 +1348,10 @@ def apply_comments(engine):
             "geometry_y":         "Latitude (duplicate of latitude column, kept for source compatibility).",
         },
         "raw_anc_records": {
-            "mother_id": "Mother identifier extracted from the raw JSON for cross-referencing with mother_journeys.",
+            "mother_id": "Mother identifier extracted from the raw JSON for cross-referencing with mothers.",
         },
         "raw_child_records": {
-            "mother_id": "Mother identifier extracted from the raw JSON for cross-referencing with mother_journeys.",
-        },
-        "raw_pregnancy_records": {
-            "mother_id":    "Mother identifier extracted from the raw JSON.",
-            "pregnancy_id": "Pregnancy identifier (<mother_id>-<sno>), linking to the corresponding mother_journeys record.",
+            "mother_id": "Mother identifier extracted from the raw JSON for cross-referencing with mothers.",
         },
         "master_districts": {
             "district_code_lgd": "LGD district code — the canonical identifier for this district.",
@@ -1242,12 +1448,18 @@ def run_migration(args):
     # ------------------------------------------------------------------
     if stage("master"):
         logger.info("=== Stage: Master reference tables ===")
-        load_csv_small(engine, MASTER_DIR / "master_districts.csv", "master_districts")
-        load_csv_small(engine, MASTER_DIR / "master_blocks.csv", "master_blocks")
-        load_csv_small(engine, MASTER_DIR / "master_villages.csv", "master_villages")
-        load_csv_small(engine, MASTER_DIR / "master_health_facilities.csv", "master_health_facilities")
-        load_csv_small(engine, MASTER_DIR / "full_mapping.csv", "geo_full_mapping")
-        load_csv_small(engine, MASTER_DIR / "match_report.csv", "geo_match_report")
+        load_csv_small(engine, MASTER_DIR /
+                       "master_districts.csv", "master_districts")
+        load_csv_small(engine, MASTER_DIR /
+                       "master_blocks.csv", "master_blocks")
+        load_csv_small(engine, MASTER_DIR /
+                       "master_villages.csv", "master_villages")
+        load_csv_small(engine, MASTER_DIR /
+                       "master_health_facilities.csv", "master_health_facilities")
+        load_csv_small(engine, MASTER_DIR /
+                       "full_mapping.csv", "geo_full_mapping")
+        load_csv_small(engine, MASTER_DIR /
+                       "match_report.csv", "geo_match_report")
 
     # ------------------------------------------------------------------
     # 3. Infrastructure tables (CSV with PostGIS points)
@@ -1271,7 +1483,8 @@ def run_migration(args):
     # 4. Geography mapping
     # ------------------------------------------------------------------
     if stage("infra") or stage("master"):
-        load_csv_small(engine, OUTPUT_DIR / "meghealth_geography_mapping.csv", "meghealth_geo_mapping")
+        load_csv_small(engine, OUTPUT_DIR /
+                       "meghealth_geography_mapping.csv", "meghealth_geo_mapping")
 
     # ------------------------------------------------------------------
     # 5. Health data tables (large CSVs — COPY protocol)
@@ -1280,17 +1493,23 @@ def run_migration(args):
         logger.info("=== Stage: Health data tables ===")
         load_csv_large(
             engine,
-            OUTPUT_DIR / "mother_journeys.csv",
-            "mother_journeys",
-            skip_if_exists=skip_if_exists,
-        )
-        load_csv_large(
-            engine,
             OUTPUT_DIR / "anc_visits_detail.csv",
             "anc_visits",
             skip_if_exists=skip_if_exists,
         )
-        load_csv_small(engine, OUTPUT_DIR / "village_indicators_monthly.csv", "village_indicators_monthly")
+        load_csv_small(engine, OUTPUT_DIR /
+                       "village_indicators_monthly.csv", "village_indicators_monthly")
+
+    # ------------------------------------------------------------------
+    # 5b. Mother App curated dataset (flattened_mothers.csv → 3 tables)
+    # ------------------------------------------------------------------
+    if stage("mother_app"):
+        logger.info("=== Stage: Mother App curated dataset ===")
+        load_flattened_mothers(
+            engine,
+            _HERE / "mecdm_dataset" / "flattened_mothers.csv",
+            skip_if_exists=skip_if_exists,
+        )
 
     # ------------------------------------------------------------------
     # 6. Raw JSON records (large — normalized relational tables)
@@ -1313,12 +1532,6 @@ def run_migration(args):
             "raw_child_records",
             skip_if_exists=skip_if_exists,
         )
-        load_json_normalized(
-            engine,
-            OUTPUT_DIR / "raw_pregnancy_records.json",
-            "raw_pregnancy_records",
-            skip_if_exists=skip_if_exists,
-        )
     elif skip_raw_json:
         logger.info("Skipping raw JSON records (--skip-raw-json)")
 
@@ -1327,15 +1540,19 @@ def run_migration(args):
     # ------------------------------------------------------------------
     if stage("ref_json"):
         logger.info("=== Stage: Reference JSON tables ===")
-        load_json_flat(engine, OUTPUT_DIR / "nfhs_indicators.json", "nfhs_indicators")
-        load_json_flat(engine, OUTPUT_DIR / "video_library.json", "video_library")
-        load_json_flat(engine, OUTPUT_DIR / "research_articles.json", "research_articles")
+        load_json_flat(engine, OUTPUT_DIR /
+                       "nfhs_indicators.json", "nfhs_indicators")
+        load_json_flat(engine, OUTPUT_DIR /
+                       "video_library.json", "video_library")
+        load_json_flat(engine, OUTPUT_DIR /
+                       "research_articles.json", "research_articles")
 
     # ------------------------------------------------------------------
     # 8. Schema objects — PKs, FKs, indexes, comments (ALWAYS last)
     # ------------------------------------------------------------------
     if stage("schema") or only is None:
-        logger.info("=== Stage: Schema objects (PKs, FKs, indexes, comments) ===")
+        logger.info(
+            "=== Stage: Schema objects (PKs, FKs, indexes, comments) ===")
         apply_primary_keys(engine)
         apply_foreign_keys(engine)
         apply_indexes(engine)
@@ -1357,7 +1574,8 @@ def _parse_args():
     )
     parser.add_argument(
         "--only",
-        choices=["geo", "master", "infra", "health", "raw_json", "ref_json", "schema"],
+        choices=["geo", "master", "infra", "health", "mother_app",
+                 "raw_json", "ref_json", "schema"],
         default=None,
         metavar="STAGE",
         help="Run only a specific migration stage.",
