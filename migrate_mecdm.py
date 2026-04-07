@@ -802,6 +802,40 @@ def load_flattened_mothers(
             f"mother_children: {totals['mother_children']:,} "
             f"in {elapsed:.1f}s"
         )
+
+        # ── Deduplicate by natural key ─────────────────────────────────────
+        # Source CSV has ~64 duplicate (mother_id, pregnancy_number) pairs.
+        # Keep the last physical occurrence (highest ctid) so the unique
+        # constraint + FKs added in apply_primary_keys/apply_foreign_keys
+        # succeed. Same approach for the long tables.
+        dedup_stmts = [
+            ("mothers", """
+                DELETE FROM mothers a USING mothers b
+                WHERE a.ctid < b.ctid
+                  AND a.mother_id        = b.mother_id
+                  AND a.pregnancy_number = b.pregnancy_number;
+            """),
+            ("mother_anc_visits_flat", """
+                DELETE FROM mother_anc_visits_flat a USING mother_anc_visits_flat b
+                WHERE a.ctid < b.ctid
+                  AND a.mother_id        = b.mother_id
+                  AND a.pregnancy_number = b.pregnancy_number
+                  AND a.anc_visit_num    = b.anc_visit_num;
+            """),
+            ("mother_children", """
+                DELETE FROM mother_children a USING mother_children b
+                WHERE a.ctid < b.ctid
+                  AND a.mother_id        = b.mother_id
+                  AND a.pregnancy_number = b.pregnancy_number
+                  AND a.child_num        = b.child_num;
+            """),
+        ]
+        for tbl, sql in dedup_stmts:
+            cursor.execute(sql)
+            if cursor.rowcount:
+                logger.info(
+                    f"  dedup {tbl}: removed {cursor.rowcount:,} duplicate row(s)")
+        raw_conn.commit()
     except Exception as exc:
         raw_conn.rollback()
         logger.error(f"Failed mother_app load: {exc}")

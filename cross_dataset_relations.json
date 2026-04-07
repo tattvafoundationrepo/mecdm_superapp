@@ -178,10 +178,24 @@
       "join_quality": "requires_cast"
     },
     {
-      "id": "mother_journeys_by_geography",
-      "description": "Mother journeys linked by district/block TEXT names",
+      "id": "mothers_by_lgd_district",
+      "description": "Mother App pregnancies linked to master_districts via LGD district code (preferred join)",
       "from": {
-        "table": "mother_journeys",
+        "table": "mothers",
+        "column": "lgd_district_code"
+      },
+      "to": {
+        "table": "master_districts",
+        "column": "district_code_lgd"
+      },
+      "cardinality": "many_to_one",
+      "join_quality": "exact"
+    },
+    {
+      "id": "mothers_by_geography",
+      "description": "Mother App pregnancies linked to master_blocks via TEXT district/block names",
+      "from": {
+        "table": "mothers",
         "columns": [
           "district",
           "block"
@@ -196,7 +210,49 @@
       },
       "cardinality": "many_to_one",
       "join_quality": "fuzzy_text",
-      "notes": "Text-based join; use UPPER(TRIM()) for matching"
+      "notes": "Use UPPER(TRIM()) for matching. Prefer mothers_by_lgd_district for the district level."
+    },
+    {
+      "id": "mother_anc_visits_to_mothers",
+      "description": "Long-form ANC visits to parent pregnancy (composite FK)",
+      "from": {
+        "table": "mother_anc_visits_flat",
+        "columns": [
+          "mother_id",
+          "pregnancy_number"
+        ]
+      },
+      "to": {
+        "table": "mothers",
+        "columns": [
+          "mother_id",
+          "pregnancy_number"
+        ]
+      },
+      "cardinality": "many_to_one",
+      "join_quality": "exact",
+      "notes": "Enforced by FK fk_manc_mothers. Each pregnancy has up to 4 ANC visit rows (anc_visit_num 1–4)."
+    },
+    {
+      "id": "mother_children_to_mothers",
+      "description": "Per-child rows to parent pregnancy (composite FK)",
+      "from": {
+        "table": "mother_children",
+        "columns": [
+          "mother_id",
+          "pregnancy_number"
+        ]
+      },
+      "to": {
+        "table": "mothers",
+        "columns": [
+          "mother_id",
+          "pregnancy_number"
+        ]
+      },
+      "cardinality": "many_to_one",
+      "join_quality": "exact",
+      "notes": "Enforced by FK fk_mchildren_mothers. Each pregnancy has up to 3 child rows (child_num 1–3)."
     },
     {
       "id": "anc_visits_by_geography",
@@ -217,20 +273,6 @@
       },
       "cardinality": "many_to_one",
       "join_quality": "fuzzy_text"
-    },
-    {
-      "id": "raw_pregnancy_to_mother_journeys",
-      "description": "Raw pregnancy records to processed mother journeys",
-      "from": {
-        "table": "raw_pregnancy_records",
-        "column": "pregnancy_id"
-      },
-      "to": {
-        "table": "mother_journeys",
-        "column": "pregnancy_id"
-      },
-      "cardinality": "one_to_one",
-      "join_quality": "exact"
     },
     {
       "id": "nfhs_by_district",
@@ -281,12 +323,12 @@
       "mitigation": "Use name+block+district composite for matching when IDs unavailable"
     },
     "text_geography_fields": {
-      "description": "mother_journeys and anc_visits use TEXT district/block names, not LGD codes",
+      "description": "mothers and anc_visits use TEXT district/block names. mothers has lgd_district_code so the district level can be joined exactly; block/village remain TEXT.",
       "affected_tables": [
-        "mother_journeys",
+        "mothers",
         "anc_visits"
       ],
-      "mitigation": "Use UPPER(TRIM()) for text matching; prefer village_indicators_monthly for aggregations"
+      "mitigation": "Prefer mothers.lgd_district_code → master_districts.district_code_lgd for the district level. For block/village use UPPER(TRIM()) text matching, or prefer village_indicators_monthly for aggregations."
     }
   },
   "recommended_join_paths": {
@@ -314,6 +356,20 @@
         "block_code_lgd",
         "district_code_lgd"
       ]
+    },
+    "mother_app_pregnancy": {
+      "path": [
+        "mothers",
+        "→",
+        "mother_anc_visits_flat",
+        "/",
+        "mother_children"
+      ],
+      "join_on": [
+        "mother_id",
+        "pregnancy_number"
+      ],
+      "reason": "Composite-FK joins (enforced) — use these instead of mother_id alone, which is non-unique because one mother may have multiple pregnancies."
     }
   }
 }

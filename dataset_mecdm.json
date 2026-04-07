@@ -53,9 +53,17 @@
           "name": "health_data",
           "description": "Core maternal and child health tracking data",
           "tables": [
-            "mother_journeys",
             "anc_visits",
             "village_indicators_monthly"
+          ]
+        },
+        {
+          "name": "mother_app",
+          "description": "Curated Mother App dataset — registration, ANC visits 1–4, delivery outcomes, and per-child results. Replaces legacy mother_journeys + raw_pregnancy_records. mothers is one row per pregnancy; mother_anc_visits_flat and mother_children are long-form children joined via composite (mother_id, pregnancy_number) FK.",
+          "tables": [
+            "mothers",
+            "mother_anc_visits_flat",
+            "mother_children"
           ]
         },
         {
@@ -63,8 +71,7 @@
           "description": "Unprocessed Meghealth API responses preserved for audit",
           "tables": [
             "raw_anc_records",
-            "raw_child_records",
-            "raw_pregnancy_records"
+            "raw_child_records"
           ]
         },
         {
@@ -80,7 +87,6 @@
       "stats_blocked_tables": [
         "raw_anc_records",
         "raw_child_records",
-        "raw_pregnancy_records",
         "geo_full_mapping",
         "geo_match_report",
         "meghealth_geo_mapping",
@@ -96,8 +102,13 @@
       ],
       "privacy_restricted_columns": [
         "mother_id",
-        "pregnancy_id",
+        "pregnancy_number",
+        "mongo_id",
+        "sangrah_id",
+        "mcts_rch_id",
         "mother_name",
+        "name_woman",
+        "name_husband",
         "phone",
         "address",
         "gps_location"
